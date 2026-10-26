@@ -217,7 +217,7 @@ class PortfolioStore:
         path = self._path(name)
         try:
             st_ = path.stat()
-            mtime = (st_.st_mtime_ns, st_.st_size)
+            mtime = (st_.st_mtime_ns, st_.st_size, st_.st_ino)
         except FileNotFoundError:
             return Portfolio(name=name.strip())
         cached = self._parsed.get(path)

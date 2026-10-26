@@ -546,8 +546,10 @@ with st.spinner("시세를 불러오는 중입니다… (처음 열 때는 30초
     all_recs, scan = cached_screen(provider, markets, config, on_progress)
 progress.empty()
 # 지수 시세가 있는 시장만 보여준다 (지수가 없으면 '시장 탓인지'를 판정할 수 없다).
-ok_markets = [m for m in markets if not provider.closes(BENCHMARKS[m], 5).empty]
-missing_markets = [m for m in markets if m not in ok_markets]
+# 분석이 실제로 건너뛴 시장(stats)과 지금 지수가 없는 시장을 모두 빠진 시장으로 본다.
+_skipped = {Market(v) for v in scan.get("skipped_markets", [])}
+missing_markets = [m for m in markets if m in _skipped or provider.closes(BENCHMARKS[m], 5).empty]
+ok_markets = [m for m in markets if m not in missing_markets]
 as_of = provider.as_of([BENCHMARKS[m] for m in ok_markets]) if ok_markets else None
 _stamp = provider.loaded_at([BENCHMARKS[m] for m in ok_markets])
 loaded = datetime.fromtimestamp(_stamp, KST).strftime("%H:%M") if _stamp else "-"
@@ -604,7 +606,7 @@ if view == VIEW_RECS:
             st.caption(
                 f"후보 {scan['checked']}개 검사 → {drop}% 이상 하락 {scan['dropped']}개 → "
                 f"시가총액 기준을 넘는 대형주 {scan['large']}개"
-                + (f" (시장 지수가 없는 {names} 종목 제외)" if missing_markets else "")
+                + (f" ({names} 종목은 지수가 없어 대형주 확인 전에 제외)" if missing_markets else "")
             )
         if not all_recs:
             st.info("조건에 맞는 종목이 없습니다. '조건 바꾸기'에서 하락폭을 낮추거나 기간을 늘려 보세요.")
@@ -622,7 +624,7 @@ if view == VIEW_RECS:
                     "상태": trend_word(r),
                     "1년 저점 대비": None if not r.low_52w else pct_down(r.price / r.low_52w - 1),
                     "5일 등락": None if r.trend_5d is None else pct_down(r.trend_5d),
-                    "시장보다 더 빠진 폭": min(r.analysis.excess_return, 0) * -100,
+                    "시장보다 더 빠진 폭": abs(pct_down(min(r.analysis.excess_return, 0))),
                     "현재가": _fmt_price(r.price, r.currency),
                     "PER": "–" if r.per is None else f"{r.per:.1f}",
                     "시가총액": _fmt_cap(r.market_cap, r.currency),
@@ -745,6 +747,7 @@ if view == VIEW_PAPER:
         unsafe_allow_html=True,
     )
 
+    show_msg("manage")  # 복원·초기화 결과는 접히는 상자 밖에 보여준다 (rerun 뒤 상자가 닫혀도 보이도록)
     st.subheader("보유 종목")
     rows = portfolio.valuation(prices, fx_now)
     if rows:
@@ -755,7 +758,8 @@ if view == VIEW_PAPER:
             # 지금도 급락 종목 목록에 있으면 그 원인과 고점 대비를, 없으면 목록에서 빠졌다고 알려준다.
             rec = now_recs.get(ticker)
             if rec is None:
-                return "급락 목록에 없음"
+                market = next((s.market for s in get_universe([Market.KOSPI, Market.US]) if s.ticker == ticker), None)
+                return "지금 확인 불가 (시세 문제)" if market in missing_markets else "급락 목록에 없음"
             return f"{CAUSE_STYLE[rec.analysis.cause][0]} {rec.analysis.cause.label} · 고점 대비 {fmt_pct(rec.drawdown)}"
 
         holdings = pd.DataFrame(
@@ -897,7 +901,6 @@ if view == VIEW_PAPER:
                 st.session_state._order_where = "manage"
                 set_msg("ok", "백업 파일로 복원했습니다.")
                 st.rerun()
-        show_msg("manage")
         st.divider()
         start_cash = st.number_input(
             "초기화할 시작 금액(원)", min_value=1_000_000, value=max(1_000_000, int(portfolio.initial_cash)),

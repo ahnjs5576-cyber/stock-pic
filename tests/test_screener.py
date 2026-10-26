@@ -217,7 +217,7 @@ def test_screen_reports_scan_counts():
     p = FakeProvider({"A.KS": gradual(end=70), "B.KS": flat(), "^KS11": flat()}, caps={"A.KS": 1e12})
     stats = {}
     screen(p, [Market.KOSPI], ScreenConfig(), stocks=KR, stats=stats)
-    assert stats == {"checked": 2, "dropped": 1, "large": 0}
+    assert stats == {"checked": 2, "dropped": 1, "large": 0, "skipped_markets": []}
 
 
 def test_stale_prices_are_served_while_refreshing_in_background():
@@ -245,3 +245,24 @@ def test_stale_prices_are_served_while_refreshing_in_background():
     cp._bg.shutdown(wait=True)
     assert cp._prices["A.KS"][1].iloc[-1] == 1.0  # 뒤에서 받은 새 값으로 바뀌었다
     assert calls["n"] == 2
+
+
+def test_recovered_ticker_invalidates_cached_results():
+    from stock_picker.data import CachingProvider
+
+    state = {"down": True}
+
+    class Flaky(FakeProvider):
+        def closes(self, ticker, days):
+            if ticker == "^KS11" and state["down"]:
+                return series([])
+            return super().closes(ticker, days)
+
+    cp = CachingProvider(Flaky({"A.KS": gradual(end=70), "^KS11": flat()}), retry_ttl=0)
+    stats = {}
+    assert screen(cp, [Market.KOSPI], ScreenConfig(), stocks=KR[:1], stats=stats) == []
+    assert stats["skipped_markets"] == ["KOSPI"]
+    before = cp.version
+    state["down"] = False
+    assert not cp.closes("^KS11", 5).empty
+    assert cp.version > before  # 결과 캐시가 옛 결과(시장 제외)를 다시 쓰지 않도록

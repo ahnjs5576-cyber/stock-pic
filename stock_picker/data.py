@@ -319,6 +319,7 @@ class CachingProvider:
             with self._lock:
                 self._prices[ticker] = hit
                 self._failed.pop(ticker, None)
+                self.version += 1  # 새 시세가 생겼으니 이전 분석 결과는 버리게 한다
         return hit[1].iloc[-days:]
 
     def as_of(self, tickers: list[str] | None = None) -> datetime | None:

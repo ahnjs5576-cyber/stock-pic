@@ -61,7 +61,15 @@ def screen(
     index_cache: dict[Market, pd.Series] = {}
     results: list[Recommendation] = []
     big_count = 0
+    skipped: set[Market] = set()
     for stock, closes in candidates:
+        if stock.market not in index_cache:
+            index_cache[stock.market] = provider.closes(BENCHMARKS[stock.market], config.lookback_days)
+        if len(index_cache[stock.market]) < 2:
+            # 시장 지수가 없으면 '시장 탓인지'를 판단할 수 없으므로 그 시장 종목은 보여주지 않는다.
+            log.warning("시장 지수 시세가 없어 %s 종목을 건너뜀", stock.market.value)
+            skipped.add(stock.market)
+            continue
         cap = provider.market_cap(stock.ticker)
         # 시가총액을 확인하지 못하면 대형주인지 알 수 없으므로 추천하지 않는다.
         if cap is None or cap < config.min_market_cap[stock.market]:
@@ -70,12 +78,6 @@ def screen(
         big_count += 1
 
         dd, peak_date, peak = drawdown_from_peak(closes)
-        if stock.market not in index_cache:
-            index_cache[stock.market] = provider.closes(BENCHMARKS[stock.market], config.lookback_days)
-        if len(index_cache[stock.market]) < 2:
-            # 시장 지수가 없으면 '시장 탓인지'를 판단할 수 없으므로 그 시장 종목은 보여주지 않는다.
-            log.warning("시장 지수 시세가 없어 %s 종목을 건너뜀", stock.market.value)
-            continue
         news = provider.news(stock)
         analysis = analyze_drop(
             closes, index_cache[stock.market], peak_date.to_pydatetime(), news, config, stock.name
@@ -115,5 +117,8 @@ def screen(
 
     results.sort(key=lambda r: r.drawdown)
     if stats is not None:
-        stats.update(checked=len(stocks), dropped=len(candidates), large=big_count)
+        stats.update(
+            checked=len(stocks), dropped=len(candidates), large=big_count,
+            skipped_markets=sorted(m.value for m in skipped),
+        )
     return results
