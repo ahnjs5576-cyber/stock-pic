@@ -35,12 +35,37 @@ class YahooProvider:
 
         self._yf = yf
         self._timeout = timeout
+        self._cache: dict[tuple[str, int], pd.Series] = {}
+
+    @staticmethod
+    def _period(days: int) -> str:
+        # 거래일 기준 days개를 확보하려면 달력일로 여유 있게 받는다.
+        return f"{int(days * 1.6) + 10}d"
+
+    def prefetch(self, tickers: list[str], days: int) -> None:
+        """여러 종목 시세를 한 번에 받아 둔다 (종목별 요청보다 훨씬 빠름)."""
+        try:
+            df = self._yf.download(
+                tickers, period=self._period(days), auto_adjust=True,
+                group_by="ticker", progress=False, threads=True,
+            )
+        except Exception as e:
+            log.warning("일괄 시세 조회 실패: %s", e)
+            return
+        for t in tickers:
+            if t not in df.columns.get_level_values(0):
+                continue
+            s = df[t]["Close"].dropna()
+            if s.empty:
+                continue
+            s.index = pd.to_datetime(s.index).tz_localize(None)
+            self._cache[(t, days)] = s.iloc[-days:]
 
     def closes(self, ticker: str, days: int) -> pd.Series:
-        # 거래일 기준 days개를 확보하려면 달력일로 여유 있게 받는다.
-        period_days = int(days * 1.6) + 10
+        if (ticker, days) in self._cache:
+            return self._cache[(ticker, days)]
         try:
-            df = self._yf.Ticker(ticker).history(period=f"{period_days}d", auto_adjust=True)
+            df = self._yf.Ticker(ticker).history(period=self._period(days), auto_adjust=True)
         except Exception as e:
             log.warning("시세 조회 실패 %s: %s", ticker, e)
             return pd.Series(dtype=float)

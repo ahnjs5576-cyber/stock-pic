@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 
 class Market(str, Enum):
@@ -63,3 +64,4 @@ class Recommendation:
     currency: str
     analysis: DropAnalysis
     news: list[NewsItem] = field(default_factory=list)
+    closes: Any = None                # 기간 내 종가 (pandas.Series), 차트용

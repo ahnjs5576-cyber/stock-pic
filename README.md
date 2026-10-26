@@ -21,7 +21,25 @@
 
 데이터는 yfinance(시세·시가총액·영문 뉴스)와 Google 뉴스 RSS(한국어 뉴스)를 사용합니다.
 
-## 사용법
+## 웹 화면
+
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py      # 브라우저에서 http://localhost:8501
+```
+
+시장·하락률·기간·하락 원인으로 거르고, 종목별로 하락 원인 설명·관련 뉴스·주가 차트를 볼 수 있습니다.
+
+### 인터넷에 올려서 링크로 보기 (Streamlit Community Cloud, 무료)
+
+1. https://share.streamlit.io 에 GitHub 계정으로 로그인
+2. **Create app** → **Deploy a public app from GitHub**
+3. Repository `ahnjs5576-cyber/stock-pic`, Branch는 이 코드가 있는 브랜치, Main file path `streamlit_app.py` 입력 후 **Deploy**
+4. (선택) AI 분석 버튼을 쓰려면 앱 **Settings → Secrets**에 `ANTHROPIC_API_KEY = "sk-ant-..."` 추가
+
+배포가 끝나면 `https://<앱이름>.streamlit.app` 형태의 링크가 생깁니다.
+
+## 명령줄 사용법
 
 ```bash
 pip install -r requirements.txt

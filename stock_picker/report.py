@@ -76,6 +76,7 @@ def to_json(recs: list[Recommendation]) -> str:
     payload = []
     for r in recs:
         d = asdict(r)
+        d.pop("closes")
         d.pop("news")  # 전체 뉴스는 생략, 사건성 뉴스만 analysis.event_news에 남긴다
         d["analysis"]["cause_label"] = r.analysis.cause.label
         payload.append(d)

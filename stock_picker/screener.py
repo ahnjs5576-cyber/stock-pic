@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import pandas as pd
 
@@ -25,14 +26,21 @@ def screen(
     markets: list[Market],
     config: ScreenConfig | None = None,
     stocks: list[Stock] | None = None,
+    on_progress: Callable[[int, int, Stock], None] | None = None,
 ) -> list[Recommendation]:
     config = config or ScreenConfig()
     stocks = stocks if stocks is not None else get_universe(markets)
 
+    prefetch = getattr(provider, "prefetch", None)
+    if prefetch:
+        prefetch([s.ticker for s in stocks], config.lookback_days)
+
     index_cache: dict[Market, pd.Series] = {}
     results: list[Recommendation] = []
 
-    for stock in stocks:
+    for i, stock in enumerate(stocks):
+        if on_progress:
+            on_progress(i, len(stocks), stock)
         try:
             closes = provider.closes(stock.ticker, config.lookback_days)
         except Exception as e:
@@ -69,6 +77,7 @@ def screen(
                 currency=CURRENCY[stock.market],
                 analysis=analysis,
                 news=news,
+                closes=closes,
             )
         )
 
