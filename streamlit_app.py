@@ -49,7 +49,8 @@ PERIODS = {"최근 3개월": 60, "최근 6개월": 120, "최근 1년": 250}
 SORTS = ["많이 빠진 순", "하락이 멈춘 종목 먼저", "시장보다 더 빠진 순"]
 
 # 화면을 바꿔도 조건이 초기화되지 않도록 위젯 값을 다시 써 둔다 (Streamlit은 화면에 없는 위젯 값을 지운다).
-for _k in ("c_market", "c_drop", "c_period", "c_sort", "c_causes", "account", "paper_buy_ticker", "paper_sell_ticker"):
+for _k in ("c_market", "c_drop", "c_period", "c_sort", "c_causes", "account", "paper_buy_ticker", "paper_sell_ticker",
+           "detail"):
     if _k in st.session_state:
         st.session_state[_k] = st.session_state[_k]
 # 조건 기본값은 세션에 한 번만 넣는다 (위젯에 기본값을 또 주면 Streamlit이 경고한다).
@@ -169,9 +170,10 @@ def signal_line(r: Recommendation) -> str:
         parts.append(f":gray-badge[하락 멈춤 · {r.days_since_low}거래일째 새 저점 없음]")
     else:
         parts.append(":gray-badge[바닥 확인 중]")
-    if a.key_news:
-        what = "급락 뒤 실적 악재 뉴스" if a.key_news_late else "급락일 무렵 악재 뉴스"
-        parts.append(f":orange-badge[{what} {a.key_news}건]")
+    if a.key_news and a.key_news_late:
+        parts.append(":gray-badge[급락 뒤 실적 보도 있음 (원인일 가능성)]")
+    elif a.key_news:
+        parts.append(f":orange-badge[급락일 무렵 악재 뉴스 {a.key_news}건]")
     elif a.event_news:
         parts.append(f":orange-badge[악재 뉴스 {len(a.event_news)}건]")
     if a.worst_day_return <= -0.08:
@@ -298,9 +300,12 @@ def drop_chart(r: Recommendation, provider: CachingProvider, config: ScreenConfi
     color = alt.Color("구분:N", title=None, scale=alt.Scale(domain=names, range=[STOCK_COLOR, INDEX_COLOR][: len(names)]),
                       legend=alt.Legend(orient="top", direction="horizontal"))
     x = alt.X("날짜:T", title=None, axis=alt.Axis(format="%m/%d", labelAngle=0))
-    dash = alt.StrokeDash("구분:N", legend=None, scale=alt.Scale(domain=names, range=[[1, 0], [5, 3]][: len(names)]))
-    lines = alt.Chart(df).mark_line(strokeWidth=2).encode(
-        strokeDash=dash,
+    # 지수 선은 옅은 실선, 기준선만 점선으로 구분한다.
+    width_ = alt.StrokeWidth("구분:N", legend=None, scale=alt.Scale(domain=names, range=[2.5, 1.5][: len(names)]))
+    opacity = alt.Opacity("구분:N", legend=None, scale=alt.Scale(domain=names, range=[1.0, 0.6][: len(names)]))
+    lines = alt.Chart(df).mark_line().encode(
+        strokeWidth=width_,
+        opacity=opacity,
         x=x,
         y=alt.Y("값:Q", title="고점=100", scale=alt.Scale(zero=False)),
         color=color,
@@ -323,12 +328,29 @@ def drop_chart(r: Recommendation, provider: CachingProvider, config: ScreenConfi
     threshold = alt.Chart(pd.DataFrame({"y": [level]})).mark_rule(strokeDash=[4, 4], color=INDEX_COLOR).encode(y="y:Q")
     threshold_text = alt.Chart(
         pd.DataFrame({"x": [r.closes.index[0]], "y": [level], "t": [f"고점 -{config.drop_threshold:.0%} 기준"]})
-    ).mark_text(align="left", dy=-6, fontSize=10, color=INDEX_COLOR).encode(x="x:T", y="y:Q", text="t")
+    ).mark_text(align="left", dy=11, fontSize=10, color=INDEX_COLOR).encode(x="x:T", y="y:Q", text="t")
     layers = [lines, threshold, threshold_text, points, labels]
     if a.worst_day is not None and a.worst_day_return <= -config.event_day_drop:
         layers.append(alt.Chart(pd.DataFrame({"x": [a.worst_day]})).mark_rule(color=SHOCK_COLOR, strokeDash=[2, 2])
                       .encode(x="x:T"))
     return alt.layer(*layers).properties(height=240)
+
+
+def keep_detail() -> None:
+    """이미 고른 종목 버튼을 다시 눌러 선택이 풀리면, 보던 종목을 그대로 유지한다."""
+    if not st.session_state.get("detail"):
+        st.session_state.detail = st.session_state.get("_last_detail")
+
+
+def trend_word(r: Recommendation) -> str:
+    """표에 넣을 짧은 추세 상태."""
+    if still_falling(r):
+        return "🔻 하락 중"
+    if r.trend_5d is not None and r.trend_5d >= 0.03:
+        return "🔺 반등"
+    if bottom_holding(r):
+        return "➖ 멈춤"
+    return "◽ 바닥 확인"
 
 
 def per_note(per: float | None) -> str:
@@ -349,7 +371,9 @@ def render_detail(r: Recommendation) -> None:
             st.markdown(line)
         stat_grid([
             ("현재가", _fmt_price(r.price, r.currency), f"고점 {_fmt_price(r.peak_price, r.currency)} ({r.peak_date:%m/%d})"),
-            ("고점 대비", fmt_pct(r.drawdown), f"시장 대비 {fmt_pct(a.excess_return)}p"),
+            ("고점 대비", fmt_pct(r.drawdown),
+             f"시장보다 {abs(pct_down(a.excess_return)):.1f}%p 더 빠짐" if a.excess_return < 0
+             else f"시장보다 {pct_down(a.excess_return):.1f}%p 덜 빠짐"),
             ("고점까지 오르면", fmt_pct(r.peak_price / r.price - 1), "고점 회복 시 수익률 (보장 아님)"),
             ("PER" if r.per else "1년 평균가 대비",
              f"{r.per:.1f}" if r.per else ("–" if not r.avg_52w else fmt_pct(r.price / r.avg_52w - 1)),
@@ -370,7 +394,8 @@ def render_detail(r: Recommendation) -> None:
             if r.per or r.pbr:
                 st.caption(
                     "PER(주가÷1주당 이익)이 10 아래면 낮은 편, 25 위면 높은 편으로 대략 나눴습니다. "
-                    "업종마다 적정 수준이 달라 같은 업종끼리 비교하는 것이 좋습니다."
+                    "PBR(주가÷1주당 순자산)이 1보다 낮으면 회사가 가진 순자산보다 싸게 거래된다는 뜻입니다. "
+                    "%p는 두 비율의 차이(예: -20%와 -10%의 차이는 10%p)입니다. 업종마다 적정 수준이 달라 같은 업종끼리 비교하세요."
                 )
         with right:
             if r.closes is not None:
@@ -392,8 +417,10 @@ def render_detail(r: Recommendation) -> None:
             st.markdown("**관련 악재 뉴스**")
             for i, n in enumerate(a.event_news[:4]):
                 title = f"[{md_text(n.title)}]({n.url})" if n.url else md_text(n.title)
-                if i < a.key_news:
-                    mark = "🔑 급락 이유로 보이는 뉴스 · "
+                if i < a.key_news and a.key_news_late:
+                    mark = "🗞 급락 뒤 나온 실적 보도 (원인일 가능성) · "
+                elif i < a.key_news:
+                    mark = "🔑 급락일 무렵 뉴스 · "
                 elif shock and n.published > a.worst_day:
                     mark = "급락 이후 보도 · "
                 else:
@@ -563,7 +590,11 @@ if view == VIEW_RECS:
     else:
         if missing_markets:
             names = ", ".join({Market.KOSPI: "코스피", Market.US: "미국"}[m] for m in missing_markets)
-            st.warning(f"{names} 시세를 불러오지 못해 그 시장 종목은 빼고 보여드립니다. 잠시 뒤 '새로 불러오기'를 눌러 주세요.")
+            idx_names = ", ".join(INDEX_NAMES[m] for m in missing_markets)
+            st.warning(
+                f"{idx_names} 시세를 받지 못해 하락 원인(시장 탓인지)을 판정할 수 없어서 {names} 종목은 잠시 뺐습니다. "
+                "잠시 뒤 '새로 불러오기'를 눌러 주세요."
+            )
         counts = " ".join(
             f"{badge(c)} **{sum(r.analysis.cause is c for r in all_recs)}**" for c in DropCause
         )
@@ -588,6 +619,7 @@ if view == VIEW_RECS:
                     "종목": r.stock.name,
                     "하락 원인": f"{CAUSE_STYLE[r.analysis.cause][0]} {r.analysis.cause.label}",
                     "고점 대비": pct_down(r.drawdown),
+                    "상태": trend_word(r),
                     "1년 저점 대비": None if not r.low_52w else pct_down(r.price / r.low_52w - 1),
                     "5일 등락": None if r.trend_5d is None else pct_down(r.trend_5d),
                     "시장보다 더 빠진 폭": min(r.analysis.excess_return, 0) * -100,
@@ -600,7 +632,7 @@ if view == VIEW_RECS:
             ]
         )
         if not detailed:
-            table = table[["종목", "하락 원인", "고점 대비"]]
+            table = table[["종목", "하락 원인", "고점 대비", "상태"]]
         styled = (
             table.style.format(
                 {"고점 대비": "{:+.1f}%", "1년 저점 대비": "{:+.1f}%", "5일 등락": "{:+.1f}%",
@@ -610,38 +642,41 @@ if view == VIEW_RECS:
             .map(updown_color, subset=[c for c in ("고점 대비", "5일 등락") if c in table.columns])
             .map(cause_color, subset=["하락 원인"])
         )
-        picked = st.dataframe(
+        st.dataframe(
             styled,
             hide_index=True,
-            width="stretch" if detailed else "content",
-            on_select="rerun",
-            selection_mode="single-row",
-            # 표 선택은 '몇 번째 행'으로 저장되므로, 조건(정렬·필터)이 바뀌면 키를 바꿔 선택을 초기화한다.
-            # 그래야 순서가 바뀐 뒤 체크 표시가 다른 종목에 붙어 상세 화면과 어긋나지 않는다.
-            key="rec_table:" + "|".join(map(str, (market_label, drop, period_label, sort_label, sorted(cause_labels)))),
+            width="stretch",
             column_config={
                 "고점 대비": st.column_config.Column(help="기간 내 최고 종가 대비 현재가"),
                 "1년 저점 대비": st.column_config.Column(
                     help="1년 중 가장 낮았던 종가보다 지금 얼마나 높은지. 0%에 가까울수록 1년 중 가장 싼 가격 근처"
                 ),
                 "5일 등락": st.column_config.Column(help="최근 5거래일 등락률. 음수면 아직 하락 중"),
+                "상태": st.column_config.Column(
+                    help="하락 중: 최근에도 새 저점을 찍는 중 · 바닥 확인: 저점 근처에서 버티는 중 · "
+                    "멈춤: 10거래일 넘게 새 저점 없음 · 반등: 최근 5일 3% 넘게 오름"
+                ),
                 "시장보다 더 빠진 폭": st.column_config.Column(help="같은 기간 시장 지수보다 몇 %p 더 빠졌는지"),
                 "PER": st.column_config.TextColumn(
                     help="주가수익비율(최근 12개월 이익 기준). 낮을수록 이익 대비 싼 편 (적자거나 정보가 없으면 –)"
                 ),
             },
         )
-        # 표에서 고른 종목을 보여준다 (선택을 풀면 마지막으로 보던 종목, 처음엔 첫 종목).
-        rows = picked.selection.rows if picked is not None else []
-        if rows:
-            st.session_state.detail = recs[rows[0]].stock.ticker
+        st.caption("표의 종목은 조건에 맞는 하락 종목일 뿐, 매수 추천이 아닙니다.")
+
+        # 종목 이름 버튼으로 고른다 (휴대폰에서도 누르기 쉽다). 목록에 없는 종목이 남아 있으면 첫 종목으로.
         by_ticker = {r.stock.ticker: r for r in recs}
         if st.session_state.get("detail") not in by_ticker:
             st.session_state.detail = recs[0].stock.ticker
-        st.caption(
-            f"👆 표 왼쪽 칸을 눌러 종목을 고르면 아래 내용이 바뀝니다 (지금: **{by_ticker[st.session_state.detail].stock.name}**). "
-            "표의 종목은 조건에 맞는 하락 종목일 뿐, 매수 추천이 아닙니다."
+        st.pills(
+            "자세히 볼 종목을 누르세요",
+            list(by_ticker),
+            format_func=lambda t: f"{CAUSE_STYLE[by_ticker[t].analysis.cause][0]} {by_ticker[t].stock.name}",
+            selection_mode="single",
+            key="detail",
+            on_change=keep_detail,
         )
+        st.session_state._last_detail = st.session_state.detail
         render_detail(by_ticker[st.session_state.detail])
 
     st.divider()
@@ -721,7 +756,7 @@ if view == VIEW_PAPER:
             rec = now_recs.get(ticker)
             if rec is None:
                 return "급락 목록에 없음"
-            return f"{CAUSE_STYLE[rec.analysis.cause][0]} {fmt_pct(rec.drawdown)}"
+            return f"{CAUSE_STYLE[rec.analysis.cause][0]} {rec.analysis.cause.label} · 고점 대비 {fmt_pct(rec.drawdown)}"
 
         holdings = pd.DataFrame(
                 [

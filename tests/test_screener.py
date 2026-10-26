@@ -218,3 +218,30 @@ def test_screen_reports_scan_counts():
     stats = {}
     screen(p, [Market.KOSPI], ScreenConfig(), stocks=KR, stats=stats)
     assert stats == {"checked": 2, "dropped": 1, "large": 0}
+
+
+def test_stale_prices_are_served_while_refreshing_in_background():
+    import threading
+
+    from stock_picker.data import CachingProvider
+
+    release = threading.Event()
+    calls = {"n": 0}
+
+    class Slow(FakeProvider):
+        def closes(self, ticker, days):
+            calls["n"] += 1
+            if calls["n"] > 1:  # 두 번째(갱신) 요청은 느리다
+                release.wait(5)
+                return series([1.0] * 30)
+            return series([2.0] * 30)
+
+    cp = CachingProvider(Slow({}), ttl=0.05, history_days=30)
+    cp.load_prices(["A.KS"])
+    import time as _t
+    _t.sleep(0.1)  # 만료시킨다
+    assert cp.closes("A.KS", 30).iloc[-1] == 2.0  # 기다리지 않고 예전 값을 돌려준다
+    release.set()
+    cp._bg.shutdown(wait=True)
+    assert cp._prices["A.KS"][1].iloc[-1] == 1.0  # 뒤에서 받은 새 값으로 바뀌었다
+    assert calls["n"] == 2

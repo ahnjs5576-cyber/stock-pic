@@ -201,6 +201,9 @@ class CachingProvider:
         # 여러 사용자가 동시에 들어와도 같은 시세를 한 번만 받도록, 받는 동안 다른 요청은 기다린다.
         self._load_lock = threading.Lock()
         self.version = 0  # 시세를 새로 받거나 버릴 때마다 올라간다 (분석 결과 캐시를 무효화하는 데 쓴다)
+        self.background = True  # 만료된 데이터를 뒤에서 갱신할지 (False면 그 자리에서 기다려 받는다)
+        self._bg = ThreadPoolExecutor(max_workers=2)
+        self._running: set = set()
         self._details: dict[tuple[str, str], tuple[float, object]] = {}
 
     def _fresh(self, stamp: float) -> bool:
@@ -234,9 +237,41 @@ class CachingProvider:
 
     # ---- 시세 ----
     def load_prices(self, tickers: list[str]) -> None:
-        """캐시에 없거나 오래된 종목만 한 번에 받아 둔다."""
+        """캐시에 없는 종목은 지금 받고, 오래된 종목은 예전 값을 그대로 쓰면서 뒤에서 새로 받는다
+        (만료 직후 처음 들어온 사용자가 전체 다운로드를 기다리지 않도록)."""
+        with self._lock:
+            absent = [t for t in tickers if t not in self._prices and self._can_retry(t)]
+            stale = [t for t in tickers if t in self._prices and not self._fresh(self._prices[t][0])]
+        if absent:
+            with self._load_lock:
+                self._load_prices(absent)
+        if stale:
+            self._in_background("prices", lambda: self._locked_load(stale))
+
+    def _locked_load(self, tickers: list[str]) -> None:
         with self._load_lock:
             self._load_prices(tickers)
+
+    def _in_background(self, key, job) -> None:
+        """같은 작업이 이미 돌고 있지 않으면 뒤에서 실행한다. background=False면 바로 실행한다(테스트용)."""
+        if not self.background:
+            job()
+            return
+        with self._lock:
+            if key in self._running:
+                return
+            self._running.add(key)
+
+        def run() -> None:
+            try:
+                job()
+            except Exception as e:  # 뒤에서 실패해도 예전 데이터는 그대로 남는다
+                log.warning("백그라운드 갱신 실패 %s: %s", key, e)
+            finally:
+                with self._lock:
+                    self._running.discard(key)
+
+        self._bg.submit(run)
 
     def _load_prices(self, tickers: list[str]) -> None:
         with self._lock:
@@ -270,11 +305,10 @@ class CachingProvider:
             hit = self._prices.get(ticker)
             stale = [t for t, v in self._prices.items() if not self._fresh(v[0])]
         if hit is not None and not self._fresh(hit[0]):
-            # 만료된 종목들을 한 번에 다시 받는다 (종목별 단건 조회가 줄줄이 일어나지 않도록).
-            self.load_prices(stale)
-            with self._lock:
-                hit = self._prices.get(ticker, hit)
-        if hit is None or not self._fresh(hit[0]):
+            # 예전 값을 바로 돌려주고, 만료된 종목들은 뒤에서 한 번에 다시 받는다.
+            self._in_background("prices", lambda: self._locked_load(stale))
+            return hit[1].iloc[-days:]
+        if hit is None:
             s = self.base.closes(ticker, self.history_days) if self._can_retry(ticker) else empty_series()
             if s.empty:
                 with self._lock:
@@ -306,12 +340,20 @@ class CachingProvider:
             hit = self._details.get(key)
         if hit is not None and time.time() < hit[0]:
             return hit[1]
-        value = fetch()
-        # 실패(None, 빈 목록)는 잠깐만 기억해서 곧 다시 시도한다.
-        ttl = self.ttl if value else self.retry_ttl
-        with self._lock:
-            self._details[key] = (time.time() + ttl, value)
-        return value
+
+        def load():
+            value = fetch()
+            # 실패(None, 빈 목록)는 잠깐만 기억해서 곧 다시 시도한다. 재무지표는 자주 안 바뀌어 하루 동안 쓴다.
+            ttl = (86400 if kind == "fund" else self.ttl) if value else self.retry_ttl
+            with self._lock:
+                self._details[key] = (time.time() + ttl, value)
+            return value
+
+        if hit is not None and hit[1]:
+            # 만료됐지만 예전 값이 있으면 그것을 쓰고 뒤에서 새로 받는다.
+            self._in_background(key, load)
+            return hit[1]
+        return load()
 
     def market_cap(self, ticker: str) -> float | None:
         return self._detail("cap", ticker, lambda: self.base.market_cap(ticker))
