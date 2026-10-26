@@ -28,7 +28,9 @@ def screen(
     config: ScreenConfig | None = None,
     stocks: list[Stock] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
+    stats: dict | None = None,
 ) -> list[Recommendation]:
+    """stats를 넘기면 검사 범위(후보 수, 하락 종목 수, 대형주 수)를 채워 준다."""
     config = config or ScreenConfig()
     stocks = stocks if stocks is not None else get_universe(markets)
 
@@ -58,12 +60,14 @@ def screen(
 
     index_cache: dict[Market, pd.Series] = {}
     results: list[Recommendation] = []
+    big_count = 0
     for stock, closes in candidates:
         cap = provider.market_cap(stock.ticker)
         # 시가총액을 확인하지 못하면 대형주인지 알 수 없으므로 추천하지 않는다.
         if cap is None or cap < config.min_market_cap[stock.market]:
             log.info("대형주 기준 미달 또는 확인 불가로 제외: %s (%s)", stock.name, cap)
             continue
+        big_count += 1
 
         dd, peak_date, peak = drawdown_from_peak(closes)
         if stock.market not in index_cache:
@@ -78,7 +82,9 @@ def screen(
         )
 
         price = float(closes.iloc[-1])
-        low = float(closes[closes.index >= peak_date].min())
+        after_peak = closes[closes.index >= peak_date]
+        low = float(after_peak.min())
+        days_since_low = len(after_peak) - 1 - int(after_peak.values.argmin())
         year = provider.closes(stock.ticker, 250)
         fetch_fund = getattr(provider, "fundamentals", None)
         fund = fetch_fund(stock.ticker) if fetch_fund else {}
@@ -96,6 +102,7 @@ def screen(
                 closes=closes,
                 low_since_peak=low,
                 rebound=price / low - 1,
+                days_since_low=days_since_low,
                 trend_5d=price / float(closes.iloc[-6]) - 1 if len(closes) >= 6 else None,
                 trend_20d=price / float(closes.iloc[-21]) - 1 if len(closes) >= 21 else None,
                 high_52w=float(year.max()) if not year.empty else None,
@@ -107,4 +114,6 @@ def screen(
         )
 
     results.sort(key=lambda r: r.drawdown)
+    if stats is not None:
+        stats.update(checked=len(stocks), dropped=len(candidates), large=big_count)
     return results

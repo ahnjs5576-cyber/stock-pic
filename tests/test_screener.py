@@ -200,3 +200,21 @@ def test_earnings_news_days_after_crash_explains_it():
     assert a.key_news == 1 and a.key_news_late
     assert a.event_news[0].title == late.title  # 원인 뉴스가 맨 앞
     assert "며칠 뒤 실적 관련 악재" in a.summary
+
+
+def test_steady_new_lows_count_as_still_falling():
+    from stock_picker.report import bottom_holding, still_falling
+
+    # 급락 뒤 매일 조금씩 새 저점: 5일·20일 하락폭은 작아도 '아직 하락 중'이다
+    vals = [100.0] * 20 + [75.0 - i * 0.05 for i in range(40)]
+    p = FakeProvider({"A.KS": series(vals), "^KS11": flat()})
+    [rec] = screen(p, [Market.KOSPI], ScreenConfig(), stocks=KR[:1])
+    assert rec.days_since_low == 0
+    assert still_falling(rec) and not bottom_holding(rec)
+
+
+def test_screen_reports_scan_counts():
+    p = FakeProvider({"A.KS": gradual(end=70), "B.KS": flat(), "^KS11": flat()}, caps={"A.KS": 1e12})
+    stats = {}
+    screen(p, [Market.KOSPI], ScreenConfig(), stocks=KR, stats=stats)
+    assert stats == {"checked": 2, "dropped": 1, "large": 0}

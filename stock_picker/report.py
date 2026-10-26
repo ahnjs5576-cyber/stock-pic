@@ -40,10 +40,19 @@ def buy_checks(rec: Recommendation) -> list[str]:
 
 
 def still_falling(rec: Recommendation) -> bool:
-    """최근 5일 -2% 이하이거나 최근 20일 -5% 이하면 아직 하락 중으로 본다."""
-    return (rec.trend_5d is not None and rec.trend_5d <= -0.02) or (
-        rec.trend_20d is not None and rec.trend_20d <= -0.05
+    """아직 하락 중인지: 최근 5일 -2% 이하, 최근 20일 -5% 이하, 또는 최근 3거래일 안에
+    새 저점을 찍었고 저점에서 1%도 못 올라온 경우 (완만하게 계속 빠지는 종목도 잡기 위해)."""
+    return (
+        (rec.trend_5d is not None and rec.trend_5d <= -0.02)
+        or (rec.trend_20d is not None and rec.trend_20d <= -0.05)
+        or (rec.days_since_low is not None and rec.days_since_low <= 2
+            and rec.rebound is not None and rec.rebound < 0.01)
     )
+
+
+def bottom_holding(rec: Recommendation, days: int = 10) -> bool:
+    """최근 저점 뒤로 days거래일 넘게 새 저점이 없으면 하락이 멈췄다고 본다."""
+    return rec.days_since_low is not None and rec.days_since_low >= days
 
 
 def range_position(rec: Recommendation) -> float | None:

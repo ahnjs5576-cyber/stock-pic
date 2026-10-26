@@ -70,6 +70,7 @@ class Recommendation:
     closes: Any = None                # 기간 내 종가 (pandas.Series), 차트용
     low_since_peak: float | None = None   # 고점 이후 최저 종가
     rebound: float | None = None          # 그 최저가 대비 현재가 (0.05 = 5% 반등)
+    days_since_low: int | None = None     # 고점 이후 최저가가 나온 뒤 지난 거래일 수 (0 = 오늘이 최저)
     trend_5d: float | None = None         # 최근 5거래일 수익률
     trend_20d: float | None = None        # 최근 20거래일 수익률
     high_52w: float | None = None

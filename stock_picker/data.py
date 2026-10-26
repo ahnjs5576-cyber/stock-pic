@@ -268,6 +268,12 @@ class CachingProvider:
     def closes(self, ticker: str, days: int) -> pd.Series:
         with self._lock:
             hit = self._prices.get(ticker)
+            stale = [t for t, v in self._prices.items() if not self._fresh(v[0])]
+        if hit is not None and not self._fresh(hit[0]):
+            # 만료된 종목들을 한 번에 다시 받는다 (종목별 단건 조회가 줄줄이 일어나지 않도록).
+            self.load_prices(stale)
+            with self._lock:
+                hit = self._prices.get(ticker, hit)
         if hit is None or not self._fresh(hit[0]):
             s = self.base.closes(ticker, self.history_days) if self._can_retry(ticker) else empty_series()
             if s.empty:

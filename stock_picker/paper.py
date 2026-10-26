@@ -197,6 +197,7 @@ class PortfolioStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._locks: dict[str, threading.Lock] = {}
+        self._parsed: dict[Path, tuple[tuple[int, int], dict]] = {}  # 파일 → (수정 시각, 읽은 내용): 바뀌지 않았으면 다시 읽지 않는다
         self._locks_guard = threading.Lock()
 
     def _path(self, name: str) -> Path:
@@ -214,9 +215,17 @@ class PortfolioStore:
 
     def load(self, name: str) -> Portfolio:
         path = self._path(name)
-        if path.exists():
-            return Portfolio.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        return Portfolio(name=name.strip())
+        try:
+            st_ = path.stat()
+            mtime = (st_.st_mtime_ns, st_.st_size)
+        except FileNotFoundError:
+            return Portfolio(name=name.strip())
+        cached = self._parsed.get(path)
+        if cached is None or cached[0] != mtime:
+            cached = (mtime, json.loads(path.read_text(encoding="utf-8")))
+            self._parsed[path] = cached
+        # 매번 새 객체를 만들어 돌려준다 (호출한 쪽이 고쳐도 캐시가 바뀌지 않도록).
+        return Portfolio.from_dict(cached[1])
 
     def save(self, portfolio: Portfolio) -> None:
         path = self._path(portfolio.name)
