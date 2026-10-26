@@ -145,7 +145,8 @@ def analyze_drop(
         lead = f"시장({'-' if index_ret < 0 else '+'}{_pp(index_ret)}%)보다 {_pp(min(excess, 0))}%p 더 빠졌습니다. "
         if near and near_late:
             body = (
-                f"{worst_day:%m/%d} 하루에 -{_pp(worst_ret)}% 급락했고, 며칠 뒤 실적 관련 악재({labels(near)})가 "
+                f"{worst_day:%m/%d} 하루에 -{_pp(worst_ret)}% 급락했고, {(near[0].published - worst_day).days}일 뒤 "
+                f"실적 관련 악재({labels(near)})가 "
                 "보도됐습니다. 이 실적 소식이 하락 이유를 설명할 수 있습니다."
             )
         elif near:

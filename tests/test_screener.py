@@ -199,7 +199,7 @@ def test_earnings_news_days_after_crash_explains_it():
     a = rec.analysis
     assert a.key_news == 1 and a.key_news_late
     assert a.event_news[0].title == late.title  # 원인 뉴스가 맨 앞
-    assert "며칠 뒤 실적 관련 악재" in a.summary
+    assert "10일 뒤 실적 관련 악재" in a.summary
 
 
 def test_steady_new_lows_count_as_still_falling():

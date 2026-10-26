@@ -49,7 +49,7 @@ PERIODS = {"최근 3개월": 60, "최근 6개월": 120, "최근 1년": 250}
 SORTS = ["많이 빠진 순", "하락이 멈춘 종목 먼저", "시장보다 더 빠진 순"]
 
 # 화면을 바꿔도 조건이 초기화되지 않도록 위젯 값을 다시 써 둔다 (Streamlit은 화면에 없는 위젯 값을 지운다).
-for _k in ("c_market", "c_drop", "c_period", "c_sort", "c_causes", "account", "paper_buy_ticker"):
+for _k in ("c_market", "c_drop", "c_period", "c_sort", "c_causes", "account", "paper_buy_ticker", "paper_sell_ticker"):
     if _k in st.session_state:
         st.session_state[_k] = st.session_state[_k]
 # 조건 기본값은 세션에 한 번만 넣는다 (위젯에 기본값을 또 주면 Streamlit이 경고한다).
@@ -64,8 +64,10 @@ if "account" not in st.session_state:
     st.session_state.account = st.query_params.get("acct") or (
         "계좌-" + "".join(random.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=5))
     )
-# 새로고침해도 같은 계좌가 열리도록 계좌 이름을 주소에 남긴다.
-if st.session_state.account.strip() and st.query_params.get("acct") != st.session_state.account:
+# 새로고침해도 같은 계좌가 열리도록 계좌 이름을 주소에 남긴다 (이름을 지우면 주소에서도 지운다).
+if not st.session_state.account.strip():
+    st.query_params.pop("acct", None)
+elif st.query_params.get("acct") != st.session_state.account:
     st.query_params["acct"] = st.session_state.account
 
 
@@ -614,7 +616,9 @@ if view == VIEW_RECS:
             width="stretch" if detailed else "content",
             on_select="rerun",
             selection_mode="single-row",
-            key="rec_table",
+            # 표 선택은 '몇 번째 행'으로 저장되므로, 조건(정렬·필터)이 바뀌면 키를 바꿔 선택을 초기화한다.
+            # 그래야 순서가 바뀐 뒤 체크 표시가 다른 종목에 붙어 상세 화면과 어긋나지 않는다.
+            key="rec_table:" + "|".join(map(str, (market_label, drop, period_label, sort_label, sorted(cause_labels)))),
             column_config={
                 "고점 대비": st.column_config.Column(help="기간 내 최고 종가 대비 현재가"),
                 "1년 저점 대비": st.column_config.Column(
@@ -676,7 +680,8 @@ if view == VIEW_PAPER:
 
     total = portfolio.total_value(prices, fx_now)
     ret = total / portfolio.initial_cash - 1
-    unrealized = total - portfolio.initial_cash - portfolio.realized_pnl()
+    # 평가손익은 보유 종목별 (평가액 - 원가)의 합. 현재가가 없는 종목은 0으로 본다.
+    unrealized = sum(r["pnl_krw"] or 0 for r in portfolio.valuation(prices, fx_now))
 
     def signed(v: float) -> str:
         # 한국 증시 관례: 오르면 빨강, 내리면 파랑. 소수점 오차로 '-0원'이 나오지 않게 원 단위로 반올림한다.
