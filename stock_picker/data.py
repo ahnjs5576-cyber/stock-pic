@@ -33,6 +33,11 @@ class MarketDataProvider(Protocol):
     def news(self, stock: Stock) -> list[NewsItem]: ...
 
 
+def empty_series() -> pd.Series:
+    """빈 시세. 날짜 인덱스를 유지해야 날짜 비교 코드가 오류 없이 빈 결과를 낸다."""
+    return pd.Series(dtype=float, index=pd.DatetimeIndex([]))
+
+
 class YahooProvider:
     def __init__(self, timeout: float = 5.0) -> None:
         import yfinance as yf  # 무거운 import는 실제 사용 시점에
@@ -50,7 +55,7 @@ class YahooProvider:
         try:
             df = self._yf.download(
                 tickers, period=self._period(days), auto_adjust=True,
-                group_by="ticker", progress=False, threads=True,
+                group_by="ticker", progress=False, threads=True, timeout=self._timeout * 4,
             )
         except Exception as e:
             log.warning("일괄 시세 조회 실패: %s", e)
@@ -71,9 +76,9 @@ class YahooProvider:
             df = self._yf.Ticker(ticker).history(period=self._period(days), auto_adjust=True, timeout=self._timeout)
         except Exception as e:
             log.warning("시세 조회 실패 %s: %s", ticker, e)
-            return pd.Series(dtype=float)
+            return empty_series()
         if df.empty:
-            return pd.Series(dtype=float)
+            return empty_series()
         s = df["Close"].dropna()
         s.index = pd.to_datetime(s.index).tz_localize(None)
         return s.iloc[-days:]
@@ -182,6 +187,8 @@ class CachingProvider:
         self._lock = threading.Lock()
         self._prices: dict[str, tuple[float, pd.Series]] = {}
         self._failed: dict[str, float] = {}  # 시세를 못 받은 종목 → 다시 시도할 시각
+        # 여러 사용자가 동시에 들어와도 같은 시세를 한 번만 받도록, 받는 동안 다른 요청은 기다린다.
+        self._load_lock = threading.Lock()
         self._details: dict[tuple[str, str], tuple[float, object]] = {}
 
     def _fresh(self, stamp: float) -> bool:
@@ -193,12 +200,31 @@ class CachingProvider:
             self._details.clear()
             self._failed.clear()
 
+    def refresh_stale(self, min_age: float = 600) -> None:
+        """min_age초보다 오래된 데이터만 버린다. 누군가 '새로 불러오기'를 연타해도
+        방금 받은 데이터까지 지워 모두가 다시 기다리는 일이 없게 한다."""
+        cutoff = time.time() - min_age
+        with self._lock:
+            self._prices = {t: v for t, v in self._prices.items() if v[0] >= cutoff}
+            self._details = {k: v for k, v in self._details.items() if v[0] - self.ttl >= cutoff}
+            self._failed.clear()
+
+    def loaded_at(self, tickers: list[str]) -> float | None:
+        """해당 종목들 시세를 받은 시각 중 가장 이른 시각 (epoch초)."""
+        with self._lock:
+            stamps = [self._prices[t][0] for t in tickers if t in self._prices]
+        return min(stamps) if stamps else None
+
     def _can_retry(self, ticker: str) -> bool:
         return time.time() >= self._failed.get(ticker, 0)
 
     # ---- 시세 ----
     def load_prices(self, tickers: list[str]) -> None:
         """캐시에 없거나 오래된 종목만 한 번에 받아 둔다."""
+        with self._load_lock:
+            self._load_prices(tickers)
+
+    def _load_prices(self, tickers: list[str]) -> None:
         with self._lock:
             missing = [
                 t for t in tickers
@@ -228,7 +254,7 @@ class CachingProvider:
         with self._lock:
             hit = self._prices.get(ticker)
         if hit is None or not self._fresh(hit[0]):
-            s = self.base.closes(ticker, self.history_days) if self._can_retry(ticker) else pd.Series(dtype=float)
+            s = self.base.closes(ticker, self.history_days) if self._can_retry(ticker) else empty_series()
             if s.empty:
                 with self._lock:
                     self._failed.setdefault(ticker, time.time() + self.retry_ttl)

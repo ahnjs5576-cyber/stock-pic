@@ -72,6 +72,7 @@ class Recommendation:
     trend_5d: float | None = None         # 최근 5거래일 수익률
     trend_20d: float | None = None        # 최근 20거래일 수익률
     high_52w: float | None = None
+    avg_52w: float | None = None
     low_52w: float | None = None
     per: float | None = None
     pbr: float | None = None

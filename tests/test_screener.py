@@ -168,3 +168,22 @@ def test_reports_render():
     md = to_markdown(recs)
     assert "사건성 하락" in md and "투자 권유가 아닙니다" in md
     assert '"cause": "EVENT"' in to_json(recs)
+
+
+def test_falling_twice_as_much_as_market_is_not_market_driven():
+    # 지수 -12%, 종목 -24%: 차이는 12%p라 절대 기준만 보면 경계지만, 두 배라서 시장 탓이 아니다
+    p = FakeProvider({"A.KS": gradual(end=76), "^KS11": gradual(end=88)})
+    [rec] = screen(p, [Market.KOSPI], ScreenConfig(excess_drop=0.15), stocks=KR[:1])
+    assert rec.analysis.cause is not DropCause.MARKET
+
+
+def test_exactly_threshold_drop_is_included():
+    # 100 → 80은 부동소수로 -0.19999999999999996이지만 20% 하락으로 쳐야 한다
+    p = FakeProvider({"A.KS": series([100.0] * 10 + [80.0] * 10), "^KS11": flat()})
+    [rec] = screen(p, [Market.KOSPI], ScreenConfig(), stocks=KR[:1])
+    assert rec.drawdown == -0.2
+
+
+def test_market_without_index_is_skipped():
+    p = FakeProvider({"A.KS": gradual(end=70), "^KS11": series([])})
+    assert screen(p, [Market.KOSPI], ScreenConfig(), stocks=KR[:1]) == []

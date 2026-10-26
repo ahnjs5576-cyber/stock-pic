@@ -151,6 +151,12 @@ class Portfolio:
             )
             if positions[str(k)].quantity <= 0 or positions[str(k)].currency not in ("KRW", "USD"):
                 raise ValueError("보유 종목 정보가 올바르지 않습니다.")
+        for t in d.get("trades", []):
+            if t["side"] not in ("BUY", "SELL") or float(t["quantity"]) != int(float(t["quantity"])):
+                raise ValueError("거래 내역 정보가 올바르지 않습니다.")
+        for v in d.get("positions", {}).values():
+            if float(v["quantity"]) != int(float(v["quantity"])):
+                raise ValueError("보유 수량은 정수여야 합니다.")
         trades = [
             Trade(
                 time=str(t["time"]), side=str(t["side"]), ticker=str(t["ticker"]), name=str(t["name"]),

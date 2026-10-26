@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 
+from .analysis import _pp
 from .models import DropCause, Recommendation
 
 DISCLAIMER = (
@@ -22,15 +23,19 @@ def buy_checks(rec: Recommendation) -> list[str]:
     """매수 전에 확인할 점: 원인별 조언 + 추세·가격 위치에 따른 신호."""
     a = rec.analysis
     notes = [ADVICE[a.cause.value]]
+    if a.cause is DropCause.MARKET and a.excess_return <= -0.05:
+        notes.append(
+            f"다만 시장보다 {_pp(a.excess_return)}%p 더 빠졌습니다. 시장이 회복돼도 이 종목은 덜 오를 수 있습니다."
+        )
     if a.cause is not DropCause.MARKET and a.excess_return <= -0.10 and still_falling(rec):
         notes.append(
-            f"⚠️ 시장보다 {abs(a.excess_return):.1%}p 더 빠졌고 지금도 약세가 이어지고 있습니다. "
+            f"⚠️ 시장보다 {_pp(a.excess_return)}%p 더 빠졌고 지금도 약세가 이어지고 있습니다. "
             "이렇게 혼자 계속 약한 종목은 아직 드러나지 않은 이유가 있을 수 있으니 특히 조심하세요."
         )
     if still_falling(rec):
         notes.append("아직 하락이 멈추지 않았습니다. 한 번에 사기보다 나눠 사는 방법을 고려하세요.")
     elif rec.rebound is not None and rec.rebound >= 0.05:
-        notes.append(f"고점 이후 최저가보다 {rec.rebound:.1%} 올라와, 하락이 멈추는 모습입니다.")
+        notes.append(f"고점 이후 최저가보다 {_pp(rec.rebound)}% 올라와, 하락이 멈추는 모습입니다.")
     return notes
 
 

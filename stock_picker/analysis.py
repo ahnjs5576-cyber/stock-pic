@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 
@@ -53,6 +54,11 @@ _PATTERNS: list[tuple[re.Pattern, str]] = [
 ] + [
     (re.compile(rf"\b{p}\b", re.IGNORECASE), label) for label, ps in _EN.items() for p in ps
 ]
+
+def _pp(v: float) -> str:
+    """비율 크기를 화면과 같은 방식(소수 첫째 자리, 0 쪽으로 자름)으로 쓴다. 예: 0.0638 → '6.3'"""
+    return f"{math.trunc(round(abs(v) * 100, 6) * 10) / 10:.1f}"
+
 
 # 급락일과 이 기간 안에 나온 뉴스를 '핵심 근거'로 본다
 KEY_NEWS_WINDOW_DAYS = 3
@@ -106,31 +112,37 @@ def analyze_drop(
         else []
     )
 
-    market_driven = index_ret <= -config.market_drop and excess > -config.excess_drop
+    # 지수가 크게 빠졌고, 이 종목이 지수보다 '조금만' 더 빠졌을 때만 시장 탓으로 본다
+    # (절대 차이와 배수 둘 다 확인: 지수 -12%에 종목 -21%면 거의 두 배라 시장 탓으로 보지 않는다).
+    market_driven = (
+        index_ret <= -config.market_drop
+        and excess > -config.excess_drop
+        and stock_ret >= index_ret * config.market_ratio
+    )
 
     if market_driven:
         cause = DropCause.MARKET
         summary = (
-            f"같은 기간 시장 지수도 {index_ret:.1%} 빠졌고, 이 종목은 시장보다 "
-            f"{abs(min(excess, 0)):.1%}p 더 빠지는 데 그쳤습니다. 시장 전체가 내려앉으면서 함께 빠진 것으로 보입니다."
+            f"같은 기간 시장 지수도 {_pp(index_ret)}% 빠졌고, 이 종목은 시장보다 "
+            f"{_pp(min(excess, 0))}%p 더 빠지는 데 그쳤습니다. 시장 전체가 내려앉으면서 함께 빠진 것으로 보입니다."
         )
     elif event_news or shock_day:
         cause = DropCause.EVENT
         labels = lambda ns: ", ".join(sorted({k for n in ns for k in n.matched_keywords}))  # noqa: E731
-        lead = f"시장({index_ret:+.1%})보다 {abs(min(excess, 0)):.1%}p 더 빠졌습니다. "
+        lead = f"시장({'-' if index_ret < 0 else '+'}{_pp(index_ret)}%)보다 {_pp(min(excess, 0))}%p 더 빠졌습니다. "
         if near:
             body = (
-                f"{worst_day:%m월 %d일} 하루에 {worst_ret:.1%} 급락했고, 그 무렵 악재 뉴스({labels(near)})가 나왔습니다. "
+                f"{worst_day:%m/%d} 하루에 -{_pp(worst_ret)}% 급락했고, 그 무렵 악재 뉴스({labels(near)})가 나왔습니다. "
                 "이 사건이 하락을 이끈 것으로 보입니다."
             )
         elif shock_day and event_news:
             body = (
-                f"{worst_day:%m월 %d일} 하루에 {worst_ret:.1%} 급락했지만, 그날 무렵의 원인 뉴스는 찾지 못했습니다. "
+                f"{worst_day:%m/%d} 하루에 -{_pp(worst_ret)}% 급락했지만, 그날 무렵의 원인 뉴스는 찾지 못했습니다. "
                 f"급락 이후에 관련 악재({labels(event_news)})가 보도됐습니다."
             )
         elif shock_day:
             body = (
-                f"{worst_day:%m월 %d일} 하루에 {worst_ret:.1%} 급락했습니다. 무언가 사건이 있었던 것으로 보이지만 "
+                f"{worst_day:%m/%d} 하루에 -{_pp(worst_ret)}% 급락했습니다. 무언가 사건이 있었던 것으로 보이지만 "
                 "원인 뉴스는 찾지 못했습니다."
             )
         else:
@@ -144,7 +156,7 @@ def analyze_drop(
             else "관련 뉴스를 찾지 못해 뉴스로는 원인을 확인할 수 없었습니다"
         )
         summary = (
-            f"시장({index_ret:+.1%})보다 {abs(min(excess, 0)):.1%}p 더 빠졌지만, 하루 급락은 없었고 "
+            f"시장({'-' if index_ret < 0 else '+'}{_pp(index_ret)}%)보다 {_pp(min(excess, 0))}%p 더 빠졌지만, 하루 급락은 없었고 "
             f"{news_part}. 매도세가 이어지며 서서히 빠진 것으로 보입니다."
         )
 

@@ -19,6 +19,8 @@ class ScreenConfig:
     market_drop: float = 0.10
     # 종목이 지수 대비 이 이상 더 빠졌으면 개별 요인으로 본다
     excess_drop: float = 0.10
+    # 시장 전반 하락으로 보려면 종목 하락률이 지수 하락률의 이 배수 이내여야 한다
+    market_ratio: float = 1.5
 
     def __post_init__(self) -> None:
         if self.min_market_cap is None:

@@ -18,7 +18,8 @@ def drawdown_from_peak(closes: pd.Series) -> tuple[float, pd.Timestamp, float]:
     """(고점 대비 하락률, 고점 날짜, 고점 가격)"""
     peak_date = closes.idxmax()
     peak = float(closes.loc[peak_date])
-    return float(closes.iloc[-1] / peak - 1), peak_date, peak
+    # 부동소수 오차 정리: 100 → 80이 -0.19999999999999996이 되어 '20% 이상'에서 빠지지 않도록
+    return round(float(closes.iloc[-1] / peak - 1), 9), peak_date, peak
 
 
 def screen(
@@ -67,6 +68,10 @@ def screen(
         dd, peak_date, peak = drawdown_from_peak(closes)
         if stock.market not in index_cache:
             index_cache[stock.market] = provider.closes(BENCHMARKS[stock.market], config.lookback_days)
+        if len(index_cache[stock.market]) < 2:
+            # 시장 지수가 없으면 '시장 탓인지'를 판단할 수 없으므로 그 시장 종목은 보여주지 않는다.
+            log.warning("시장 지수 시세가 없어 %s 종목을 건너뜀", stock.market.value)
+            continue
         news = provider.news(stock)
         analysis = analyze_drop(
             closes, index_cache[stock.market], peak_date.to_pydatetime(), news, config, stock.name
@@ -94,6 +99,7 @@ def screen(
                 trend_5d=price / float(closes.iloc[-6]) - 1 if len(closes) >= 6 else None,
                 trend_20d=price / float(closes.iloc[-21]) - 1 if len(closes) >= 21 else None,
                 high_52w=float(year.max()) if not year.empty else None,
+                avg_52w=float(year.mean()) if not year.empty else None,
                 low_52w=float(year.min()) if not year.empty else None,
                 per=fund.get("per"),
                 pbr=fund.get("pbr"),
