@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
+from datetime import datetime, timedelta
 
 import altair as alt
 import pandas as pd
@@ -45,7 +47,7 @@ PERIODS = {"최근 3개월": 60, "최근 6개월": 120, "최근 1년": 250}
 SORTS = ["많이 빠진 순", "이유 없는 하락 먼저", "시장보다 더 빠진 순"]
 
 # 화면을 바꿔도 조건이 초기화되지 않도록 위젯 값을 다시 써 둔다 (Streamlit은 화면에 없는 위젯 값을 지운다).
-for _k in ("c_market", "c_drop", "c_period", "c_sort", "c_causes", "account"):
+for _k in ("c_market", "c_drop", "c_period", "c_sort", "c_causes", "account", "paper_buy_ticker"):
     if _k in st.session_state:
         st.session_state[_k] = st.session_state[_k]
 
@@ -89,6 +91,45 @@ def fmt_krw(v: float) -> str:
     return f"{v:,.0f}원"
 
 
+def md_price(v: float, currency: str) -> str:
+    """마크다운에 넣을 가격. '$'가 수식 기호로 해석되지 않도록 이스케이프한다."""
+    return _fmt_price(v, currency).replace("$", r"\$")
+
+
+def md_text(text: str) -> str:
+    """뉴스 제목 등 외부 문자열을 마크다운에 안전하게 넣는다."""
+    for ch in "\\$[]*_`<>":
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
+def news_search_url(name: str, around: datetime | None) -> str:
+    q = f"{name} 주가"
+    if around is not None:
+        q += f" after:{(around - timedelta(days=3)):%Y-%m-%d} before:{(around + timedelta(days=3)):%Y-%m-%d}"
+    return "https://news.google.com/search?hl=ko&gl=KR&ceid=KR:ko&q=" + urllib.parse.quote(q)
+
+
+def signal_line(r: Recommendation) -> str:
+    """상세 카드 맨 위의 판단 요약 한 줄."""
+    a = r.analysis
+    parts = []
+    if r.trend_5d is not None:
+        parts.append(
+            "🔻 아직 하락 중" if r.trend_5d <= -0.03 else "🔺 반등 중" if r.trend_5d >= 0.03 else "➖ 최근 5일 횡보"
+        )
+    if a.event_news:
+        parts.append(f"📰 악재 뉴스 {len(a.event_news)}건")
+    elif a.worst_day_return <= -0.08:
+        parts.append(f"⚡ 하루 {a.worst_day_return:.0%} 급락")
+    pos = range_position(r)
+    if pos is not None:
+        parts.append("📍 1년 최저권" if pos <= 0.1 else f"📍 1년 범위 하위 {pos:.0%}")
+    if r.per:
+        parts.append(f"💰 PER {r.per:.1f}")
+    return " · ".join(parts)
+
+
 def badge(cause: DropCause) -> str:
     icon, color = CAUSE_STYLE[cause]
     return f":{color}-badge[{icon} {cause.label}]"
@@ -105,12 +146,13 @@ sort_label = st.session_state.get("c_sort", SORTS[0])
 cause_labels = st.session_state.get("c_causes", [c.label for c in DropCause])
 
 if view == VIEW_RECS:
-    st.title("📉 대형주 급락 종목")
+    st.title("📉 급락 대형주")
     st.markdown(
         f"코스피·미국 **대형주** 가운데 **{period_label} 고점보다 {drop}% 이상 싸진 종목**을 찾고, "
         "**왜 빠졌는지** 함께 알려드립니다."
     )
-    with st.expander(f"🔧 조건 바꾸기 · {market_label} · {drop}% 이상 · {period_label} · {sort_label}"):
+    # 제목이 바뀌면 펼친 상자가 닫히므로 제목은 고정하고, 현재 조건은 위 문장에 보여준다.
+    with st.expander("🔧 조건 바꾸기 (시장 · 하락폭 · 기간 · 정렬)"):
         c1, c2 = st.columns(2)
         c1.radio("시장", list(MARKETS), key="c_market", horizontal=True)
         c2.select_slider("고점 대비 최소 하락폭", options=[10, 15, 20, 25, 30, 40, 50], value=20,
@@ -183,6 +225,7 @@ if view == VIEW_RECS:
             st.info("조건에 맞는 종목이 없습니다. '조건 바꾸기'에서 하락폭을 낮추거나 기간을 늘려 보세요.")
 
     if recs:
+        detailed = st.toggle("모든 정보 보기", value=False, help="끄면 휴대폰에서도 보기 쉬운 핵심 열만 보여줍니다.")
         table = pd.DataFrame(
             [
                 {
@@ -192,7 +235,9 @@ if view == VIEW_RECS:
                     "최근 5일": None if r.trend_5d is None else r.trend_5d * 100,
                     "시장보다 더 빠진 폭": min(r.analysis.excess_return, 0) * -100,
                     "현재가": _fmt_price(r.price, r.currency),
-                    "1년 가격 위치": None if (p := range_position(r)) is None else p * 100,
+                    "1년 중 위치": "–" if (p := range_position(r)) is None else (
+                        "최저권" if p <= 0.1 else f"하위 {p:.0%}"
+                    ),
                     "PER": "–" if r.per is None else f"{r.per:.1f}",
                     "시가총액": _fmt_cap(r.market_cap, r.currency),
                     "종목코드": r.stock.ticker,
@@ -200,6 +245,8 @@ if view == VIEW_RECS:
                 for r in recs
             ]
         )
+        if not detailed:
+            table = table[["종목", "하락 원인", "고점 대비", "최근 5일", "1년 중 위치"]]
         st.dataframe(
             table,
             hide_index=True,
@@ -210,9 +257,8 @@ if view == VIEW_RECS:
                 "시장보다 더 빠진 폭": st.column_config.NumberColumn(
                     format="%.1f%%p", help="같은 기간 시장 지수보다 얼마나 더 빠졌는지"
                 ),
-                "1년 가격 위치": st.column_config.ProgressColumn(
-                    min_value=0, max_value=100, format="%.0f",
-                    help="1년 최저가를 0, 최고가를 100으로 봤을 때 지금 가격의 위치. 낮을수록 1년 중 싼 편",
+                "1년 중 위치": st.column_config.TextColumn(
+                    help="1년 최저가부터 최고가까지 중 지금 가격이 어디쯤인지. '최저권'은 1년 중 가장 싼 쪽 10% 안",
                 ),
                 "PER": st.column_config.TextColumn(help="주가수익비율. 낮을수록 이익 대비 싼 편 (적자거나 정보가 없으면 –)"),
             },
@@ -226,13 +272,15 @@ if view == VIEW_RECS:
                 left, right = st.columns([3, 2])
                 with left:
                     st.markdown(f"{badge(a.cause)} &nbsp; {CAUSE_HELP[a.cause]}")
-                    st.write(a.summary)
+                    if line := signal_line(r):
+                        st.markdown(f"**{line}**")
+                    st.write(a.summary.replace("$", r"\$"))
                     facts = [
-                        f"현재가 **{_fmt_price(r.price, r.currency)}**",
-                        f"고점 {_fmt_price(r.peak_price, r.currency)} ({r.peak_date:%m/%d})",
+                        f"현재가 **{md_price(r.price, r.currency)}**",
+                        f"고점 {md_price(r.peak_price, r.currency)} ({r.peak_date:%m/%d})",
                     ]
                     if r.low_since_peak:
-                        facts.append(f"고점 이후 최저 {_fmt_price(r.low_since_peak, r.currency)}")
+                        facts.append(f"고점 이후 최저 {md_price(r.low_since_peak, r.currency)}")
                     if r.per:
                         facts.append(f"PER {r.per:.1f}")
                     if r.pbr:
@@ -248,20 +296,31 @@ if view == VIEW_RECS:
                                 a.worst_day is not None
                                 and abs((n.published - a.worst_day).days) <= KEY_NEWS_WINDOW_DAYS
                             )
-                            title = f"[{n.title}]({n.url})" if n.url else n.title
+                            title = f"[{md_text(n.title)}]({n.url})" if n.url else md_text(n.title)
                             mark = "🔑 급락일 무렵 · " if near else ""
                             st.markdown(
                                 f"- {mark}{n.published:%Y-%m-%d} · {title} "
                                 + " ".join(f":orange-badge[{k}]" for k in n.matched_keywords)
                             )
                     else:
-                        st.caption(f"고점 이후 뉴스 {a.news_checked}건을 확인했지만 악재 표현은 없었습니다.")
+                        if a.cause is DropCause.EVENT and a.worst_day is not None:
+                            st.markdown(
+                                f"{a.worst_day:%m/%d} 급락의 원인 뉴스를 자동으로 찾지 못했습니다. "
+                                f"[그 무렵 뉴스 직접 찾아보기]({news_search_url(r.stock.name, a.worst_day)})"
+                            )
+                        elif a.news_checked:
+                            st.caption(f"고점 이후 뉴스 {a.news_checked}건을 확인했지만 악재 표현은 없었습니다.")
+                        else:
+                            st.markdown(
+                                "관련 뉴스를 찾지 못했습니다. "
+                                f"[뉴스 직접 찾아보기]({news_search_url(r.stock.name, None)})"
+                            )
                         latest = sorted(
                             (n for n in r.news if n.published and n.published >= r.peak_date),
                             key=lambda n: n.published, reverse=True,
                         )[:3]
                         for n in latest:
-                            title = f"[{n.title}]({n.url})" if n.url else n.title
+                            title = f"[{md_text(n.title)}]({n.url})" if n.url else md_text(n.title)
                             st.markdown(f"- {n.published:%Y-%m-%d} · {title}")
 
                     key = f"ai:{r.stock.ticker}:{r.peak_date:%Y%m%d}"
@@ -308,7 +367,7 @@ if view == VIEW_RECS:
                         st.altair_chart(alt.layer(*layers).properties(height=230), width="stretch")
                         st.caption(f"점선: 고점보다 {drop}% 낮은 가격" + (" · 주황 선: 급락일" if len(layers) > 4 else ""))
 
-                with st.form(key=f"buyform:{r.stock.ticker}", border=False):
+                with st.form(key=f"buyform:{r.stock.ticker}", border=False, enter_to_submit=False):
                     fc = st.columns([2, 1], vertical_alignment="bottom")
                     fc[0].number_input("모의 매수 수량(주)", min_value=1, value=1, step=1, key=f"qty:{r.stock.ticker}")
                     fc[1].form_submit_button(
@@ -348,8 +407,9 @@ def place_buy(ticker: str, name: str, currency: str, qty_key: str) -> None:
     except ValueError:
         st.session_state.trade_msg = ("err", "모의투자 화면에서 계좌 이름을 먼저 입력하세요.")
         return
+    st.session_state[qty_key] = 1  # 같은 수량이 실수로 다시 주문되지 않도록 되돌린다
     st.session_state.trade_msg = (
-        "ok", f"[{account.strip()}] {name} {qty}주 매수 ({_fmt_price(price, currency)}, 총 {fmt_krw(t.amount_krw)})"
+        "ok", f"[{account.strip()}] {name} {qty}주 매수 ({md_price(price, currency)}, 총 {fmt_krw(t.amount_krw)})"
     )
 
 
@@ -402,7 +462,8 @@ if view == VIEW_PAPER:
     unrealized = total - portfolio.initial_cash - portfolio.realized_pnl()
 
     def signed(v: float) -> str:
-        # 한국 증시 관례: 오르면 빨강, 내리면 파랑
+        # 한국 증시 관례: 오르면 빨강, 내리면 파랑. 소수점 오차로 '-0원'이 나오지 않게 원 단위로 반올림한다.
+        v = round(v) or 0
         color = "#d6334a" if v > 0 else "#1F5FBF" if v < 0 else "inherit"
         return f'<span style="color:{color}">{v:+,.0f}원</span>'
 
@@ -474,8 +535,8 @@ if view == VIEW_PAPER:
         stock = by_ticker[ticker]
         currency = CURRENCY[stock.market]
         price = quote(ticker)
-        st.caption("현재가 " + ("확인 불가" if price is None else _fmt_price(price, currency)))
-        with st.form("paper_buy_form", border=False):
+        st.caption("현재가 " + ("확인 불가" if price is None else md_price(price, currency)))
+        with st.form("paper_buy_form", border=False, enter_to_submit=False):
             st.number_input("수량(주)", min_value=1, value=1, step=1, key="paper_buy_qty")
             st.form_submit_button(
                 "사기", type="primary", on_click=place_buy,
@@ -488,14 +549,16 @@ if view == VIEW_PAPER:
             sell_ticker = st.selectbox(
                 "보유 종목",
                 list(portfolio.positions),
-                format_func=lambda t: f"{portfolio.positions[t].name} · {portfolio.positions[t].quantity}주",
+                format_func=lambda t: portfolio.positions[t].name,
                 key="paper_sell_ticker",
             )
             pos = portfolio.positions[sell_ticker]
-            st.caption("현재가 " + ("확인 불가" if sell_ticker not in prices else _fmt_price(prices[sell_ticker], pos.currency)))
-            qty_key = f"paper_sell_qty:{sell_ticker}"
-            with st.form("paper_sell_form", border=False):
-                st.number_input("수량(주)", min_value=1, max_value=pos.quantity, value=pos.quantity, step=1, key=qty_key)
+            now = "확인 불가" if sell_ticker not in prices else md_price(prices[sell_ticker], pos.currency)
+            st.caption(f"보유 {pos.quantity}주 · 현재가 {now}")
+            # 보유 수량을 키에 넣어, 팔고 나면 입력칸이 새로 만들어지게 한다 (이전 값이 남지 않도록).
+            qty_key = f"paper_sell_qty:{sell_ticker}:{pos.quantity}"
+            with st.form("paper_sell_form", border=False, enter_to_submit=False):
+                st.number_input("수량(주)", min_value=1, max_value=pos.quantity, value=1, step=1, key=qty_key)
                 st.form_submit_button("팔기", on_click=place_sell, args=(sell_ticker, pos.currency, qty_key))
         else:
             st.caption("팔 종목이 없습니다.")

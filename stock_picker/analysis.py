@@ -124,10 +124,14 @@ def analyze_drop(
         )
     else:
         cause = DropCause.NO_CLEAR_REASON
+        news_part = (
+            f"고점 이후 뉴스 {len(recent)}건에서도 악재 표현을 찾지 못했습니다"
+            if recent
+            else "관련 뉴스를 찾지 못해 뉴스로는 원인을 확인할 수 없었습니다"
+        )
         summary = (
-            f"시장({index_ret:+.1%})보다 {abs(min(excess, 0)):.1%}p 더 빠졌지만, 하루 급락도 없고 "
-            f"고점 이후 뉴스 {len(recent)}건에서 악재 표현을 찾지 못했습니다. "
-            "매도세가 이어지며 서서히 빠진 것으로 보입니다."
+            f"시장({index_ret:+.1%})보다 {abs(min(excess, 0)):.1%}p 더 빠졌지만, 하루 급락은 없었고 "
+            f"{news_part}. 매도세가 이어지며 서서히 빠진 것으로 보입니다."
         )
 
     return DropAnalysis(

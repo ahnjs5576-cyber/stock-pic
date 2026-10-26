@@ -92,57 +92,6 @@ class YahooProvider:
 
         return {"per": num("trailingPE"), "pbr": num("priceToBook")}
 
-    def market_cap(self, ticker: str) -> float | None: ...
-
-    def news(self, stock: Stock) -> list[NewsItem]: ...
-
-
-class YahooProvider:
-    def __init__(self, timeout: float = 10.0) -> None:
-        import yfinance as yf  # 무거운 import는 실제 사용 시점에
-
-        self._yf = yf
-        self._timeout = timeout
-        self._cache: dict[tuple[str, int], pd.Series] = {}
-
-    @staticmethod
-    def _period(days: int) -> str:
-        # 거래일 기준 days개를 확보하려면 달력일로 여유 있게 받는다.
-        return f"{int(days * 1.6) + 10}d"
-
-    def prefetch(self, tickers: list[str], days: int) -> None:
-        """여러 종목 시세를 한 번에 받아 둔다 (종목별 요청보다 훨씬 빠름)."""
-        try:
-            df = self._yf.download(
-                tickers, period=self._period(days), auto_adjust=True,
-                group_by="ticker", progress=False, threads=True,
-            )
-        except Exception as e:
-            log.warning("일괄 시세 조회 실패: %s", e)
-            return
-        for t in tickers:
-            if t not in df.columns.get_level_values(0):
-                continue
-            s = df[t]["Close"].dropna()
-            if s.empty:
-                continue
-            s.index = pd.to_datetime(s.index).tz_localize(None)
-            self._cache[(t, days)] = s.iloc[-days:]
-
-    def closes(self, ticker: str, days: int) -> pd.Series:
-        if (ticker, days) in self._cache:
-            return self._cache[(ticker, days)]
-        try:
-            df = self._yf.Ticker(ticker).history(period=self._period(days), auto_adjust=True)
-        except Exception as e:
-            log.warning("시세 조회 실패 %s: %s", ticker, e)
-            return pd.Series(dtype=float)
-        if df.empty:
-            return pd.Series(dtype=float)
-        s = df["Close"].dropna()
-        s.index = pd.to_datetime(s.index).tz_localize(None)
-        return s.iloc[-days:]
-
     def market_cap(self, ticker: str) -> float | None:
         try:
             cap = self._yf.Ticker(ticker).fast_info.get("marketCap")
@@ -222,9 +171,12 @@ class CachingProvider:
     여러 사용자가 한 인스턴스를 같이 써도 되도록 잠금을 건다.
     """
 
-    def __init__(self, base, ttl: float = 3600, history_days: int = 260, workers: int = 8) -> None:
+    def __init__(
+        self, base, ttl: float = 3600, history_days: int = 260, workers: int = 8, retry_ttl: float = 300
+    ) -> None:
         self.base = base
         self.ttl = ttl
+        self.retry_ttl = retry_ttl
         self.history_days = history_days
         self.workers = workers
         self._lock = threading.Lock()
@@ -262,7 +214,8 @@ class CachingProvider:
         if hit is None or not self._fresh(hit[0]):
             s = self.base.closes(ticker, self.history_days)
             if s.empty:
-                return s
+                # 다시 받기에 실패하면 예전 시세라도 쓴다 (기준일은 as_of로 드러난다).
+                return hit[1].iloc[-days:] if hit else s
             hit = (time.time(), s)
             with self._lock:
                 self._prices[ticker] = hit
@@ -279,11 +232,13 @@ class CachingProvider:
         key = (kind, ticker)
         with self._lock:
             hit = self._details.get(key)
-        if hit is not None and self._fresh(hit[0]):
+        if hit is not None and time.time() < hit[0]:
             return hit[1]
         value = fetch()
+        # 실패(None, 빈 목록)는 잠깐만 기억해서 곧 다시 시도한다.
+        ttl = self.ttl if value else self.retry_ttl
         with self._lock:
-            self._details[key] = (time.time(), value)
+            self._details[key] = (time.time() + ttl, value)
         return value
 
     def market_cap(self, ticker: str) -> float | None:
@@ -296,7 +251,12 @@ class CachingProvider:
         fetch = getattr(self.base, "fundamentals", None)
         if fetch is None:
             return {"per": None, "pbr": None}
-        return self._detail("fund", ticker, lambda: fetch(ticker))
+        # 값이 하나도 없으면 실패로 보고 짧게만 캐시한다.
+        def get() -> dict:
+            got = fetch(ticker)
+            return got if any(v is not None for v in got.values()) else {}
+
+        return self._detail("fund", ticker, get) or {"per": None, "pbr": None}
 
     def warm(self, stocks: list[Stock], on_progress: Callable[[int, int], None] | None = None) -> None:
         """후보 종목의 시가총액·뉴스·재무지표를 병렬로 받아 둔다."""

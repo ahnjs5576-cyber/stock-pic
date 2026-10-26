@@ -93,7 +93,7 @@ class Portfolio:
         fx = fx if pos.currency == "USD" else 1.0
         amount = quantity * price * fx
         cost = pos.cost_krw * quantity / pos.quantity
-        realized = amount - cost
+        realized = round(amount - cost, 2)  # 같은 가격에 팔면 정확히 0이 되도록
 
         pos.quantity -= quantity
         pos.cost_krw -= cost
@@ -141,12 +141,30 @@ class Portfolio:
 
     @classmethod
     def from_dict(cls, d: dict) -> Portfolio:
+        # 사용자가 손으로 고친 백업 파일도 들어올 수 있으므로 타입을 강제한다 (틀리면 ValueError/TypeError).
+        positions = {}
+        for k, v in d.get("positions", {}).items():
+            positions[str(k)] = Position(
+                ticker=str(v["ticker"]), name=str(v["name"]), currency=str(v["currency"]),
+                quantity=int(v["quantity"]), avg_price=float(v["avg_price"]), cost_krw=float(v["cost_krw"]),
+            )
+            if positions[str(k)].quantity <= 0 or positions[str(k)].currency not in ("KRW", "USD"):
+                raise ValueError("보유 종목 정보가 올바르지 않습니다.")
+        trades = [
+            Trade(
+                time=str(t["time"]), side=str(t["side"]), ticker=str(t["ticker"]), name=str(t["name"]),
+                quantity=int(t["quantity"]), price=float(t["price"]), fx=float(t["fx"]),
+                amount_krw=float(t["amount_krw"]), realized_krw=float(t.get("realized_krw", 0.0)),
+                currency=str(t.get("currency", "KRW")),
+            )
+            for t in d.get("trades", [])
+        ]
         return cls(
-            name=d["name"],
-            initial_cash=d["initial_cash"],
-            cash=d["cash"],
-            positions={k: Position(**v) for k, v in d.get("positions", {}).items()},
-            trades=[Trade(**t) for t in d.get("trades", [])],
+            name=str(d["name"]),
+            initial_cash=float(d["initial_cash"]),
+            cash=float(d["cash"]),
+            positions=positions,
+            trades=trades,
         )
 
 
