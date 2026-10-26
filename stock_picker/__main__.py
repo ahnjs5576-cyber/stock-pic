@@ -31,9 +31,9 @@ def main(argv: list[str] | None = None) -> int:
     ]
     config = ScreenConfig(drop_threshold=args.drop / 100, lookback_days=args.lookback)
 
-    from .data import YahooProvider
+    from .data import CachingProvider, YahooProvider
 
-    provider = YahooProvider()
+    provider = CachingProvider(YahooProvider())
     for m in markets:
         if provider.closes(BENCHMARKS[m], 5).empty:
             print(f"{m.value} 시세 데이터를 가져오지 못했습니다. 네트워크 연결을 확인하세요.", file=sys.stderr)

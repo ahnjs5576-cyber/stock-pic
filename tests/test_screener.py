@@ -97,8 +97,69 @@ def test_cause_market_when_index_also_fell():
 
 def test_keyword_matching_uses_word_boundaries():
     assert match_keywords("Company defined new strategy") == []
-    assert match_keywords("Company fined $2B by EU") == ["규제·제재"]
-    assert match_keywords("Apple lowers guidance") == ["가이던스 하향"]
+    assert match_keywords("Company fined $2B by EU") == ["소송·수사"]
+    assert match_keywords("Apple lowers guidance") == ["전망 하향"]
+
+
+def test_neutral_or_positive_headlines_are_not_events():
+    assert match_keywords("FDA clears new drug") == []
+    assert match_keywords("규제 완화 기대감") == []
+    assert match_keywords("흑자 전환, 적자 탈출") == []
+    assert match_keywords("지금 사고 싶다면") == []
+
+
+def test_company_name_is_ignored_when_matching():
+    # '삼성화재'의 '화재'를 사고로 보면 안 된다
+    assert match_keywords("삼성화재, 3분기 순이익 증가", "삼성화재") == []
+    assert match_keywords("삼성화재 공장 화재 사고", "삼성화재") == ["사고·운영 차질"]
+
+
+def test_unknown_market_cap_is_excluded():
+    class NoCap(FakeProvider):
+        def market_cap(self, ticker):
+            return None
+
+    p = NoCap({"A.KS": gradual(end=70), "^KS11": flat()})
+    assert screen(p, [Market.KOSPI], ScreenConfig(), stocks=KR[:1]) == []
+
+
+def test_undated_news_is_ignored():
+    news = [NewsItem("갑 어닝쇼크", published=None)]
+    p = FakeProvider({"A.KS": gradual(end=70), "^KS11": flat()}, news={"A.KS": news})
+    [rec] = screen(p, [Market.KOSPI], ScreenConfig(), stocks=KR[:1])
+    assert rec.analysis.cause is DropCause.NO_CLEAR_REASON
+    assert rec.analysis.news_checked == 0
+
+
+def test_buy_signals_are_computed():
+    p = FakeProvider({"A.KS": gap_down(), "^KS11": flat()})
+    [rec] = screen(p, [Market.KOSPI], ScreenConfig(), stocks=KR[:1])
+    assert rec.low_since_peak == 75
+    assert rec.rebound == 0
+    assert rec.trend_5d == 0
+    assert rec.high_52w == 100 and rec.low_52w == 75
+
+
+def test_caching_provider_fetches_once_and_slices():
+    from stock_picker.data import CachingProvider
+
+    calls = {"closes": 0, "news": 0}
+
+    class Counting(FakeProvider):
+        def closes(self, ticker, days):
+            calls["closes"] += 1
+            return super().closes(ticker, days)
+
+        def news(self, stock):
+            calls["news"] += 1
+            return []
+
+    cp = CachingProvider(Counting({"A.KS": gradual(end=70), "^KS11": flat()}), history_days=60)
+    for drop in (0.2, 0.25, 0.1):
+        screen(cp, [Market.KOSPI], ScreenConfig(drop_threshold=drop, lookback_days=30), stocks=KR[:1])
+    assert calls["closes"] == 2  # 종목 + 지수, 처음 한 번씩만
+    assert calls["news"] == 1
+    assert len(cp.closes("A.KS", 30)) == 30
 
 
 def test_reports_render():

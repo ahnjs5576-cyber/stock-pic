@@ -64,3 +64,27 @@ def test_store_roundtrip(tmp_path):
     assert loaded.cash == p.cash
     with pytest.raises(ValueError):
         store.load("   ")
+
+
+def test_transaction_does_not_lose_concurrent_updates(tmp_path):
+    store = PortfolioStore(tmp_path)
+    stale = store.load("acct")  # 다른 탭에서 미리 열어 둔 화면
+    with store.transaction("acct") as p:
+        p.buy("005930.KS", "삼성전자", "KRW", 2, 50_000)
+    with store.transaction("acct") as p:
+        p.buy("005930.KS", "삼성전자", "KRW", 1, 50_000)
+    assert stale.positions == {}
+    assert store.load("acct").positions["005930.KS"].quantity == 3
+
+
+def test_failed_trade_is_not_saved(tmp_path):
+    store = PortfolioStore(tmp_path)
+    with pytest.raises(TradeError):
+        with store.transaction("acct") as p:
+            p.buy("005930.KS", "삼성전자", "KRW", 10_000, 50_000)
+    assert store.load("acct").cash == p.initial_cash
+
+
+def test_similar_names_map_to_different_files(tmp_path):
+    store = PortfolioStore(tmp_path)
+    assert store._path("a b") != store._path("a_b")

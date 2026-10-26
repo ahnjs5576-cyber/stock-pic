@@ -49,7 +49,8 @@ class DropAnalysis:
     excess_return: float              # 종목 수익률 - 지수 수익률
     worst_day_return: float           # 고점 이후 가장 크게 빠진 하루 수익률
     worst_day: datetime | None
-    event_news: list[NewsItem] = field(default_factory=list)
+    event_news: list[NewsItem] = field(default_factory=list)  # 급락일에 가까운 순
+    news_checked: int = 0             # 판정에 쓴 (날짜 있는) 고점 이후 뉴스 수
     ai_explanation: str | None = None
 
 
@@ -65,3 +66,10 @@ class Recommendation:
     analysis: DropAnalysis
     news: list[NewsItem] = field(default_factory=list)
     closes: Any = None                # 기간 내 종가 (pandas.Series), 차트용
+    low_since_peak: float | None = None   # 고점 이후 최저 종가
+    rebound: float | None = None          # 그 최저가 대비 현재가 (0.05 = 5% 반등)
+    trend_5d: float | None = None         # 최근 5거래일 수익률
+    high_52w: float | None = None
+    low_52w: float | None = None
+    per: float | None = None
+    pbr: float | None = None

@@ -6,9 +6,13 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 import urllib.parse
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Protocol
 
@@ -23,6 +27,70 @@ log = logging.getLogger(__name__)
 class MarketDataProvider(Protocol):
     def closes(self, ticker: str, days: int) -> pd.Series:
         """최근 `days` 거래일의 종가 (DatetimeIndex, 오래된 순)."""
+
+    def market_cap(self, ticker: str) -> float | None: ...
+
+    def news(self, stock: Stock) -> list[NewsItem]: ...
+
+
+class YahooProvider:
+    def __init__(self, timeout: float = 5.0) -> None:
+        import yfinance as yf  # 무거운 import는 실제 사용 시점에
+
+        self._yf = yf
+        self._timeout = timeout
+
+    @staticmethod
+    def _period(days: int) -> str:
+        # 거래일 기준 days개를 확보하려면 달력일로 여유 있게 받는다.
+        return f"{int(days * 1.6) + 10}d"
+
+    def closes_many(self, tickers: list[str], days: int) -> dict[str, pd.Series]:
+        """여러 종목 시세를 한 번에 받는다 (종목별 요청보다 훨씬 빠름)."""
+        try:
+            df = self._yf.download(
+                tickers, period=self._period(days), auto_adjust=True,
+                group_by="ticker", progress=False, threads=True,
+            )
+        except Exception as e:
+            log.warning("일괄 시세 조회 실패: %s", e)
+            return {}
+        out = {}
+        for t in tickers:
+            if t not in df.columns.get_level_values(0):
+                continue
+            s = df[t]["Close"].dropna()
+            if s.empty:
+                continue
+            s.index = pd.to_datetime(s.index).tz_localize(None)
+            out[t] = s.iloc[-days:]
+        return out
+
+    def closes(self, ticker: str, days: int) -> pd.Series:
+        try:
+            df = self._yf.Ticker(ticker).history(period=self._period(days), auto_adjust=True)
+        except Exception as e:
+            log.warning("시세 조회 실패 %s: %s", ticker, e)
+            return pd.Series(dtype=float)
+        if df.empty:
+            return pd.Series(dtype=float)
+        s = df["Close"].dropna()
+        s.index = pd.to_datetime(s.index).tz_localize(None)
+        return s.iloc[-days:]
+
+    def fundamentals(self, ticker: str) -> dict[str, float | None]:
+        """PER·PBR. 값이 없거나 조회에 실패하면 None."""
+        try:
+            info = self._yf.Ticker(ticker).info or {}
+        except Exception as e:
+            log.warning("재무지표 조회 실패 %s: %s", ticker, e)
+            return {"per": None, "pbr": None}
+
+        def num(key: str) -> float | None:
+            v = info.get(key)
+            return float(v) if isinstance(v, (int, float)) and v > 0 else None
+
+        return {"per": num("trailingPE"), "pbr": num("priceToBook")}
 
     def market_cap(self, ticker: str) -> float | None: ...
 
@@ -108,7 +176,8 @@ class YahooProvider:
             if c.get("pubDate"):
                 published = pd.to_datetime(c["pubDate"]).tz_localize(None).to_pydatetime()
             elif c.get("providerPublishTime"):
-                published = datetime.fromtimestamp(c["providerPublishTime"])
+                # 다른 뉴스와 같은 기준(UTC, 시간대 정보 없음)으로 맞춘다.
+                published = datetime.fromtimestamp(c["providerPublishTime"], tz=timezone.utc).replace(tzinfo=None)
             out.append(NewsItem(title=title, url=url, source=source, published=published))
         return out
 
@@ -125,7 +194,7 @@ class YahooProvider:
         except Exception as e:
             log.warning("Google 뉴스 조회 실패 %s: %s", query, e)
             return []
-        out = []
+        out: list[NewsItem] = []
         for item in root.iter("item"):
             title = item.findtext("title") or ""
             published = None
@@ -139,4 +208,106 @@ class YahooProvider:
                     published=published,
                 )
             )
+        # 최신 뉴스 30건만 쓴다 (RSS는 날짜순이 아닐 수 있다).
+        out.sort(key=lambda n: n.published or datetime.min, reverse=True)
         return out[:30]
+
+
+class CachingProvider:
+    """다른 제공자를 감싸서 결과를 일정 시간(ttl) 동안 재사용한다.
+
+    - 시세는 history_days만큼 한 번에 받아 두고, 더 짧은 기간은 잘라서 돌려준다.
+      그래서 하락률·기간 조건을 바꿔도 다시 내려받지 않는다.
+    - 시가총액·뉴스·재무지표는 종목별로 캐시하고, warm()으로 병렬 조회한다.
+    여러 사용자가 한 인스턴스를 같이 써도 되도록 잠금을 건다.
+    """
+
+    def __init__(self, base, ttl: float = 3600, history_days: int = 260, workers: int = 8) -> None:
+        self.base = base
+        self.ttl = ttl
+        self.history_days = history_days
+        self.workers = workers
+        self._lock = threading.Lock()
+        self._prices: dict[str, tuple[float, pd.Series]] = {}
+        self._details: dict[tuple[str, str], tuple[float, object]] = {}
+
+    def _fresh(self, stamp: float) -> bool:
+        return time.time() - stamp < self.ttl
+
+    def clear(self) -> None:
+        with self._lock:
+            self._prices.clear()
+            self._details.clear()
+
+    # ---- 시세 ----
+    def load_prices(self, tickers: list[str]) -> None:
+        """캐시에 없거나 오래된 종목만 한 번에 받아 둔다."""
+        with self._lock:
+            missing = [t for t in tickers if t not in self._prices or not self._fresh(self._prices[t][0])]
+        if not missing:
+            return
+        many = getattr(self.base, "closes_many", None)
+        got = many(missing, self.history_days) if many else {
+            t: self.base.closes(t, self.history_days) for t in missing
+        }
+        now = time.time()
+        with self._lock:
+            for t, s in got.items():
+                if not s.empty:
+                    self._prices[t] = (now, s)
+
+    def closes(self, ticker: str, days: int) -> pd.Series:
+        with self._lock:
+            hit = self._prices.get(ticker)
+        if hit is None or not self._fresh(hit[0]):
+            s = self.base.closes(ticker, self.history_days)
+            if s.empty:
+                return s
+            hit = (time.time(), s)
+            with self._lock:
+                self._prices[ticker] = hit
+        return hit[1].iloc[-days:]
+
+    def as_of(self) -> datetime | None:
+        """캐시된 시세 중 가장 최근 거래일."""
+        with self._lock:
+            dates = [s.index[-1] for _, s in self._prices.values() if not s.empty]
+        return max(dates).to_pydatetime() if dates else None
+
+    # ---- 종목별 상세 ----
+    def _detail(self, kind: str, ticker: str, fetch):
+        key = (kind, ticker)
+        with self._lock:
+            hit = self._details.get(key)
+        if hit is not None and self._fresh(hit[0]):
+            return hit[1]
+        value = fetch()
+        with self._lock:
+            self._details[key] = (time.time(), value)
+        return value
+
+    def market_cap(self, ticker: str) -> float | None:
+        return self._detail("cap", ticker, lambda: self.base.market_cap(ticker))
+
+    def news(self, stock: Stock) -> list[NewsItem]:
+        return self._detail("news", stock.ticker, lambda: self.base.news(stock))
+
+    def fundamentals(self, ticker: str) -> dict[str, float | None]:
+        fetch = getattr(self.base, "fundamentals", None)
+        if fetch is None:
+            return {"per": None, "pbr": None}
+        return self._detail("fund", ticker, lambda: fetch(ticker))
+
+    def warm(self, stocks: list[Stock], on_progress: Callable[[int, int], None] | None = None) -> None:
+        """후보 종목의 시가총액·뉴스·재무지표를 병렬로 받아 둔다."""
+        jobs = []
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            for s in stocks:
+                jobs += [
+                    pool.submit(self.market_cap, s.ticker),
+                    pool.submit(self.news, s),
+                    pool.submit(self.fundamentals, s.ticker),
+                ]
+            for i, _ in enumerate(as_completed(jobs), 1):
+                if on_progress:
+                    on_progress(i, len(jobs))

@@ -5,11 +5,19 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import threading
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+KST = ZoneInfo("Asia/Seoul")
 
 DEFAULT_CASH = 10_000_000.0  # 1,000만원
 
@@ -143,17 +151,30 @@ class Portfolio:
 
 
 class PortfolioStore:
-    """계좌를 계좌 이름별 JSON 파일로 저장한다."""
+    """계좌를 계좌 이름별 JSON 파일로 저장한다.
+
+    같은 계좌를 여러 탭·기기에서 동시에 써도 거래가 사라지지 않도록,
+    거래는 transaction() 안에서 '최신 상태 읽기 → 변경 → 저장'을 계좌별 잠금으로 묶는다.
+    """
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
 
     def _path(self, name: str) -> Path:
-        safe = re.sub(r"[^\w가-힣-]", "_", name.strip())[:40]
+        name = name.strip()
+        safe = re.sub(r"[^\w가-힣-]", "_", name)[:40]
         if not safe:
             raise ValueError("계좌 이름이 비어 있습니다.")
-        return self.root / f"{safe}.json"
+        # 'a b'와 'a_b'처럼 다른 이름이 같은 파일이 되지 않도록 원래 이름의 해시를 붙인다.
+        digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+        return self.root / f"{safe}-{digest}.json"
+
+    def _lock(self, name: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._locks.setdefault(name.strip(), threading.Lock())
 
     def load(self, name: str) -> Portfolio:
         path = self._path(name)
@@ -163,10 +184,24 @@ class PortfolioStore:
 
     def save(self, portfolio: Portfolio) -> None:
         path = self._path(portfolio.name)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp")
         tmp.write_text(json.dumps(portfolio.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
 
+    def replace(self, portfolio: Portfolio) -> None:
+        """계좌 전체를 바꾼다 (복원·초기화). 진행 중인 거래와 겹치지 않게 잠근다."""
+        with self._lock(portfolio.name):
+            self.save(portfolio)
+
+    @contextmanager
+    def transaction(self, name: str) -> Iterator[Portfolio]:
+        """최신 계좌를 읽어 넘겨주고, 블록이 예외 없이 끝나면 저장한다."""
+        with self._lock(name):
+            portfolio = self.load(name)
+            yield portfolio
+            self.save(portfolio)
+
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    # 서버가 어느 나라에 있든 한국 시각으로 기록한다.
+    return datetime.now(KST).replace(tzinfo=None).isoformat(timespec="seconds")

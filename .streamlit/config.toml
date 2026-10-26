@@ -1,0 +1,7 @@
+[client]
+# 일반 사용자에게 개발자 메뉴(Deploy 등)를 숨긴다
+toolbarMode = "minimal"
+
+[theme]
+# 한국 증시 관례: 하락은 파란색
+primaryColor = "#1F5FBF"

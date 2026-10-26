@@ -12,10 +12,32 @@ DISCLAIMER = (
 )
 
 ADVICE = {
-    "EVENT": "사건이 기업 가치를 영구적으로 훼손했는지 확인한 뒤 접근하세요.",
-    "MARKET": "시장 회복 시 함께 반등할 가능성이 있습니다. 지수 흐름을 같이 보세요.",
-    "NO_CLEAR_REASON": "펀더멘털 변화 없이 빠졌다면 저가 매수 후보가 될 수 있습니다.",
+    "EVENT": "악재가 일회성(소송 합의, 일시적 비용 등)인지, 앞으로의 실적 전망 자체를 바꾸는 것인지 먼저 확인하세요.",
+    "MARKET": "시장 전체가 빠진 경우라 시장이 회복되면 함께 오를 가능성이 있습니다. 지수 흐름을 같이 보세요.",
+    "NO_CLEAR_REASON": "회사에 특별한 악재 없이 빠졌다면 저가 매수 후보가 될 수 있습니다. 다만 업황 변화는 따로 확인하세요.",
 }
+
+
+def buy_checks(rec: Recommendation) -> list[str]:
+    """매수 전에 확인할 점: 원인별 조언 + 추세·가격 위치에 따른 신호."""
+    notes = [ADVICE[rec.analysis.cause.value]]
+    if rec.trend_5d is not None and rec.trend_5d <= -0.03:
+        notes.append(
+            f"최근 5거래일 동안 {rec.trend_5d:.1%} 더 빠져 아직 하락 중입니다. "
+            "한 번에 사기보다 나눠 사는 방법을 고려하세요."
+        )
+    elif rec.rebound is not None and rec.rebound >= 0.05:
+        notes.append(f"고점 이후 최저가보다 {rec.rebound:.1%} 올라와, 하락이 멈추는 모습입니다.")
+    if rec.low_52w and rec.price <= rec.low_52w * 1.03:
+        notes.append("1년 중 가장 낮은 가격 근처입니다.")
+    return notes
+
+
+def range_position(rec: Recommendation) -> float | None:
+    """1년 가격 범위 안에서 현재가 위치 (0 = 1년 최저, 1 = 1년 최고)."""
+    if not rec.high_52w or not rec.low_52w or rec.high_52w <= rec.low_52w:
+        return None
+    return (rec.price - rec.low_52w) / (rec.high_52w - rec.low_52w)
 
 
 def _fmt_price(v: float, currency: str) -> str:
@@ -59,7 +81,7 @@ def to_markdown(recs: list[Recommendation], max_news: int = 3) -> str:
                 link = f"[{n.title}]({n.url})" if n.url else n.title
                 lines.append(f"- {date}{link} `{', '.join(n.matched_keywords)}`")
             lines.append("")
-        lines += [f"> {ADVICE[a.cause.value]}", ""]
+        lines += [f"> {note}" for note in buy_checks(r)] + [""]
 
     lines.append(DISCLAIMER)
     return "\n".join(lines)
