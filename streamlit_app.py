@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import random
 import urllib.parse
 from datetime import datetime, timedelta
 
@@ -13,11 +15,11 @@ import streamlit as st
 from stock_picker.analysis import KEY_NEWS_WINDOW_DAYS
 from stock_picker.config import ScreenConfig
 from stock_picker.data import CachingProvider, YahooProvider
-from stock_picker.models import DropCause, Market, Recommendation
-from stock_picker.paper import Portfolio, PortfolioStore, TradeError
-from stock_picker.report import DISCLAIMER, _fmt_cap, _fmt_price, buy_checks, range_position
+from stock_picker.models import DropCause, Market, Recommendation, Stock
+from stock_picker.paper import KST, Portfolio, PortfolioStore, TradeError
+from stock_picker.report import DISCLAIMER, _fmt_cap, _fmt_price, buy_checks, range_position, still_falling
 from stock_picker.screener import screen
-from stock_picker.universe import CURRENCY, get_universe
+from stock_picker.universe import BENCHMARKS, CURRENCY, get_universe
 
 st.set_page_config(page_title="대형주 급락 종목", page_icon="📉", layout="wide")
 
@@ -35,7 +37,7 @@ CACHE_TTL = 3600
 CAUSE_STYLE = {  # 아이콘, 배지 색
     DropCause.EVENT: ("⚠️", "orange"),
     DropCause.MARKET: ("🌊", "violet"),
-    DropCause.NO_CLEAR_REASON: ("❔", "gray"),
+    DropCause.NO_CLEAR_REASON: ("🔍", "green"),
 }
 CAUSE_HELP = {
     DropCause.EVENT: "하루 급락이나 악재 뉴스(실적 부진, 소송, 증자 등)가 확인된 하락",
@@ -50,6 +52,13 @@ SORTS = ["많이 빠진 순", "이유 없는 하락 먼저", "시장보다 더 �
 for _k in ("c_market", "c_drop", "c_period", "c_sort", "c_causes", "account", "paper_buy_ticker"):
     if _k in st.session_state:
         st.session_state[_k] = st.session_state[_k]
+# 조건 기본값은 세션에 한 번만 넣는다 (위젯에 기본값을 또 주면 Streamlit이 경고한다).
+for _k, _v in {"c_market": "코스피 + 미국", "c_drop": 20, "c_period": "최근 3개월", "c_sort": SORTS[0],
+               "c_causes": [c.label for c in DropCause]}.items():
+    st.session_state.setdefault(_k, _v)
+if "account" not in st.session_state:
+    # 방문자마다 다른 계좌가 열리도록 처음엔 임의 이름을 준다 (같은 이름을 입력하면 같은 계좌).
+    st.session_state.account = "계좌-" + "".join(random.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=5))
 
 
 @st.cache_resource
@@ -67,24 +76,10 @@ def get_store() -> PortfolioStore:
 STORE = get_store()
 
 
-class QuoteUnavailable(Exception):
-    pass
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _quote(ticker: str) -> float:
-    s = YahooProvider().closes(ticker, 5)
-    if s.empty:
-        raise QuoteUnavailable(ticker)  # 실패는 캐시하지 않도록 예외로 빠져나간다
-    return float(s.iloc[-1])
-
-
 def quote(ticker: str) -> float | None:
-    """주문·평가용 가장 최근 가격 (성공한 값만 5분 캐시)."""
-    try:
-        return _quote(ticker)
-    except QuoteUnavailable:
-        return None
+    """주문·평가용 가격: 추천 화면과 같은 캐시의 가장 최근 가격 (최대 1시간 전)."""
+    s = get_provider().closes(ticker, 5)
+    return None if s.empty else float(s.iloc[-1])
 
 
 def fmt_krw(v: float) -> str:
@@ -103,21 +98,30 @@ def md_text(text: str) -> str:
     return text
 
 
-def news_search_url(name: str, around: datetime | None) -> str:
-    q = f"{name} 주가"
+def news_search_url(stock: Stock, around: datetime | None) -> str:
+    korean = stock.market is Market.KOSPI
+    q = f"{stock.name} 주가" if korean else f"{stock.name} stock"
     if around is not None:
         q += f" after:{(around - timedelta(days=3)):%Y-%m-%d} before:{(around + timedelta(days=3)):%Y-%m-%d}"
-    return "https://news.google.com/search?hl=ko&gl=KR&ceid=KR:ko&q=" + urllib.parse.quote(q)
+    lang = "hl=ko&gl=KR&ceid=KR:ko" if korean else "hl=en-US&gl=US&ceid=US:en"
+    return f"https://news.google.com/search?{lang}&q=" + urllib.parse.quote(q)
+
+
+def pct_down(dd: float) -> float:
+    """하락률을 0 쪽으로 잘라 % 단위로 (예: -24.98% → -24.9). 반올림하면 기준(25%)을 넘은 것처럼 보일 수 있다."""
+    return math.trunc(dd * 1000) / 10
 
 
 def signal_line(r: Recommendation) -> str:
     """상세 카드 맨 위의 판단 요약 한 줄."""
     a = r.analysis
     parts = []
-    if r.trend_5d is not None:
-        parts.append(
-            "🔻 아직 하락 중" if r.trend_5d <= -0.03 else "🔺 반등 중" if r.trend_5d >= 0.03 else "➖ 최근 5일 횡보"
-        )
+    if still_falling(r):
+        parts.append("🔻 아직 하락 중")
+    elif r.trend_5d is not None and r.trend_5d >= 0.03:
+        parts.append("🔺 반등 중")
+    elif r.trend_5d is not None:
+        parts.append("➖ 하락 멈춤")
     if a.event_news:
         parts.append(f"📰 악재 뉴스 {len(a.event_news)}건")
     elif a.worst_day_return <= -0.08:
@@ -135,33 +139,140 @@ def badge(cause: DropCause) -> str:
     return f":{color}-badge[{icon} {cause.label}]"
 
 
+# ======================= 주문 처리 (버튼 콜백) =======================
+def set_msg(kind: str, text: str) -> None:
+    """주문 결과를 기록한다. 결과는 주문한 폼 바로 아래에 고정으로 보이고, 토스트로도 한 번 뜬다."""
+    st.session_state.trade_msg = (kind, text, st.session_state.get("_order_where", ""), datetime.now(KST))
+    st.session_state.toast_pending = True
+
+
+def show_msg(where: str) -> None:
+    msg = st.session_state.get("trade_msg")
+    if msg and msg[2] == where:
+        (st.success if msg[0] == "ok" else st.error)(f"{msg[1]} ({msg[3]:%H:%M:%S})", icon="✅" if msg[0] == "ok" else "⚠️")
+
+
+def load_portfolio() -> Portfolio | None:
+    try:
+        return STORE.load(st.session_state.account)
+    except ValueError:
+        return None
+
+
+def place_buy(ticker: str, name: str, currency: str, qty_key: str, where: str) -> None:
+    st.session_state._order_where = where
+    # 폼 안의 수량은 제출 시점에 확정되므로 콜백에서 직접 읽는다.
+    qty = int(st.session_state[qty_key])
+    account = st.session_state.account
+    price = quote(ticker)
+    fx = quote(FX_TICKER) if currency == "USD" else 1.0
+    if price is None or fx is None:
+        set_msg("err", "현재가나 환율을 가져오지 못해 주문하지 못했습니다. 잠시 뒤 다시 시도하세요.")
+        return
+    try:
+        # 최신 계좌를 다시 읽어서 거래해야 다른 탭에서 한 거래를 덮어쓰지 않는다.
+        with STORE.transaction(account) as portfolio:
+            t = portfolio.buy(ticker, name, currency, qty, price, fx)
+    except TradeError as e:
+        set_msg("err", str(e))
+        return
+    except ValueError:
+        set_msg("err", "모의투자 화면에서 계좌 이름을 먼저 입력하세요.")
+        return
+    st.session_state[qty_key] = 1  # 같은 수량이 실수로 다시 주문되지 않도록 되돌린다
+    set_msg(
+        "ok", f"[{account.strip()}] {name} {qty}주 매수 ({md_price(price, currency)}, 총 {fmt_krw(t.amount_krw)})"
+    )
+
+
+def place_sell(ticker: str, currency: str, qty_key: str, where: str) -> None:
+    st.session_state._order_where = where
+    qty = int(st.session_state[qty_key])
+    account = st.session_state.account
+    price = quote(ticker)
+    fx = quote(FX_TICKER) if currency == "USD" else 1.0
+    if price is None or fx is None:
+        set_msg("err", "현재가나 환율을 가져오지 못해 주문하지 못했습니다. 잠시 뒤 다시 시도하세요.")
+        return
+    try:
+        with STORE.transaction(account) as portfolio:
+            t = portfolio.sell(ticker, qty, price, fx)
+    except (TradeError, ValueError) as e:
+        set_msg("err", str(e))
+        return
+    st.session_state.pop(qty_key, None)
+    set_msg("ok", f"{t.name} {qty}주 매도 (실현손익 {t.realized_krw:+,.0f}원)")
+
+
+INDEX_NAMES = {Market.KOSPI: "코스피 지수", Market.US: "S&P 500"}
+STOCK_COLOR, INDEX_COLOR, SHOCK_COLOR = "#1F5FBF", "#9AA0A6", "#D9822B"
+
+
+def drop_chart(r: Recommendation, provider: CachingProvider, config: ScreenConfig) -> alt.LayerChart:
+    """종목과 시장 지수를 고점=100으로 맞춰 한 축에 그린다 (가격 단위가 달라도 비교할 수 있도록)."""
+    a = r.analysis
+    peak = pd.Timestamp(r.peak_date)
+    stock = (r.closes / r.peak_price * 100).rename("값")
+    frames = [pd.DataFrame({"날짜": stock.index, "값": stock.values, "가격": r.closes.values, "구분": r.stock.name})]
+    idx = provider.closes(BENCHMARKS[r.stock.market], config.lookback_days)
+    idx = idx[idx.index >= r.closes.index[0]]
+    at_peak = idx[idx.index <= peak]
+    if not idx.empty and not at_peak.empty:
+        norm = idx / float(at_peak.iloc[-1]) * 100
+        frames.append(pd.DataFrame({"날짜": norm.index, "값": norm.values, "가격": idx.values,
+                                    "구분": INDEX_NAMES[r.stock.market]}))
+    df = pd.concat(frames)
+    names = list(df["구분"].unique())
+    color = alt.Color("구분:N", title=None, scale=alt.Scale(domain=names, range=[STOCK_COLOR, INDEX_COLOR][: len(names)]),
+                      legend=alt.Legend(orient="top", direction="horizontal"))
+    x = alt.X("날짜:T", title=None, axis=alt.Axis(format="%m/%d", labelAngle=0))
+    lines = alt.Chart(df).mark_line(strokeWidth=2).encode(
+        x=x,
+        y=alt.Y("값:Q", title="고점=100", scale=alt.Scale(zero=False)),
+        color=color,
+        tooltip=[alt.Tooltip("날짜:T", format="%Y-%m-%d"), "구분:N",
+                 alt.Tooltip("값:Q", title="고점=100", format=".1f"), alt.Tooltip("가격:Q", format=",.2f")],
+    )
+    marks = pd.DataFrame([
+        {"날짜": peak, "값": 100.0, "표시": "고점"},
+        {"날짜": r.closes.index[-1], "값": r.price / r.peak_price * 100, "표시": f"현재 {r.drawdown:.0%}"},
+    ])
+    points = alt.Chart(marks).mark_point(size=60, filled=True, color=STOCK_COLOR).encode(x="날짜:T", y="값:Q")
+    labels = alt.Chart(marks).mark_text(dy=-10, fontSize=11, align="right").encode(x="날짜:T", y="값:Q", text="표시")
+    threshold = alt.Chart(pd.DataFrame({"y": [100 * (1 - config.drop_threshold)]})).mark_rule(
+        strokeDash=[4, 4], color=INDEX_COLOR
+    ).encode(y="y:Q")
+    layers = [lines, threshold, points, labels]
+    if a.worst_day is not None and a.worst_day_return <= -config.event_day_drop:
+        layers.append(alt.Chart(pd.DataFrame({"x": [a.worst_day]})).mark_rule(color=SHOCK_COLOR, strokeDash=[2, 2])
+                      .encode(x="x:T"))
+    return alt.layer(*layers).properties(height=240)
+
+
 # ======================= 상단 =======================
 VIEW_RECS, VIEW_PAPER = "📉 급락 종목 찾기", "💼 모의투자"
 view = st.radio("화면", [VIEW_RECS, VIEW_PAPER], key="view", horizontal=True, label_visibility="collapsed")
 
-market_label = st.session_state.get("c_market", "코스피 + 미국")
-drop = st.session_state.get("c_drop", 20)
-period_label = st.session_state.get("c_period", "최근 3개월")
-sort_label = st.session_state.get("c_sort", SORTS[0])
-cause_labels = st.session_state.get("c_causes", [c.label for c in DropCause])
+market_label, drop = st.session_state.c_market, st.session_state.c_drop
+period_label, sort_label = st.session_state.c_period, st.session_state.c_sort
+cause_labels = st.session_state.c_causes
 
 if view == VIEW_RECS:
     st.title("📉 급락 대형주")
     st.markdown(
-        f"코스피·미국 **대형주** 가운데 **{period_label} 고점보다 {drop}% 이상 싸진 종목**을 찾고, "
+        f"{market_label.replace(' + ', '·')} **대형주** 가운데 **{period_label} 고점보다 {drop}% 이상 싸진 종목**을 찾고, "
         "**왜 빠졌는지** 함께 알려드립니다."
     )
     # 제목이 바뀌면 펼친 상자가 닫히므로 제목은 고정하고, 현재 조건은 위 문장에 보여준다.
     with st.expander("🔧 조건 바꾸기 (시장 · 하락폭 · 기간 · 정렬)"):
         c1, c2 = st.columns(2)
         c1.radio("시장", list(MARKETS), key="c_market", horizontal=True)
-        c2.select_slider("고점 대비 최소 하락폭", options=[10, 15, 20, 25, 30, 40, 50], value=20,
+        c2.select_slider("고점 대비 최소 하락폭", options=[10, 15, 20, 25, 30, 40, 50],
                          format_func=lambda v: f"{v}%", key="c_drop")
         c3, c4 = st.columns(2)
         c3.selectbox("고점을 찾을 기간", list(PERIODS), key="c_period")
         c4.selectbox("정렬", SORTS, key="c_sort")
-        st.multiselect("하락 원인", [c.label for c in DropCause],
-                       default=[c.label for c in DropCause], key="c_causes")
+        st.multiselect("하락 원인", [c.label for c in DropCause], key="c_causes")
     # 위젯이 막 바뀐 경우를 반영
     market_label, drop = st.session_state.c_market, st.session_state.c_drop
     period_label, sort_label = st.session_state.c_period, st.session_state.c_sort
@@ -179,7 +290,7 @@ with st.spinner("시세를 불러오는 중입니다… (처음 열 때는 30초
 
     all_recs = screen(provider, markets, config, on_progress=on_progress)
 progress.empty()
-as_of = provider.as_of()
+as_of = provider.as_of([BENCHMARKS[m] for m in markets])
 data_ok = as_of is not None
 
 if sort_label == "이유 없는 하락 먼저":
@@ -198,7 +309,6 @@ if view == VIEW_RECS:
         )
     if top[1].button("↻ 새로 불러오기", width="stretch"):
         provider.clear()
-        _quote.clear()
         st.rerun()
 
     with st.expander("ℹ️ 이렇게 골라요"):
@@ -220,7 +330,8 @@ if view == VIEW_RECS:
         counts = " ".join(
             f"{badge(c)} **{sum(r.analysis.cause is c for r in all_recs)}**" for c in DropCause
         )
-        st.markdown(f"#### 찾은 종목 {len(all_recs)}개 &nbsp; {counts}")
+        shown = f" (원인 필터로 {len(recs)}개 표시)" if len(recs) != len(all_recs) else ""
+        st.markdown(f"#### 찾은 종목 {len(all_recs)}개{shown} &nbsp; {counts}")
         if not recs:
             st.info("조건에 맞는 종목이 없습니다. '조건 바꾸기'에서 하락폭을 낮추거나 기간을 늘려 보세요.")
 
@@ -231,11 +342,11 @@ if view == VIEW_RECS:
                 {
                     "종목": r.stock.name,
                     "하락 원인": f"{CAUSE_STYLE[r.analysis.cause][0]} {r.analysis.cause.label}",
-                    "고점 대비": r.drawdown * 100,
-                    "최근 5일": None if r.trend_5d is None else r.trend_5d * 100,
+                    "고점 대비": pct_down(r.drawdown),
+                    "5일 등락": None if r.trend_5d is None else r.trend_5d * 100,
                     "시장보다 더 빠진 폭": min(r.analysis.excess_return, 0) * -100,
                     "현재가": _fmt_price(r.price, r.currency),
-                    "1년 중 위치": "–" if (p := range_position(r)) is None else (
+                    "1년 위치": "–" if (p := range_position(r)) is None else (
                         "최저권" if p <= 0.1 else f"하위 {p:.0%}"
                     ),
                     "PER": "–" if r.per is None else f"{r.per:.1f}",
@@ -246,29 +357,33 @@ if view == VIEW_RECS:
             ]
         )
         if not detailed:
-            table = table[["종목", "하락 원인", "고점 대비", "최근 5일", "1년 중 위치"]]
+            table = table[["종목", "하락 원인", "고점 대비", "5일 등락", "1년 위치"]]
+            short = {DropCause.EVENT: "사건성", DropCause.MARKET: "시장 전반", DropCause.NO_CLEAR_REASON: "이유 불분명"}
+            table["하락 원인"] = [f"{CAUSE_STYLE[r.analysis.cause][0]} {short[r.analysis.cause]}" for r in recs]
         st.dataframe(
             table,
             hide_index=True,
             width="stretch",
             column_config={
-                "고점 대비": st.column_config.NumberColumn(format="%.1f%%", help="기간 내 최고 종가 대비 현재가"),
-                "최근 5일": st.column_config.NumberColumn(format="%+.1f%%", help="최근 5거래일 등락률. 음수면 아직 하락 중"),
+                "고점 대비": st.column_config.NumberColumn(format="%.1f%%", width="small", help="기간 내 최고 종가 대비 현재가"),
+                "5일 등락": st.column_config.NumberColumn(format="%+.1f%%", width="small", help="최근 5거래일 등락률. 음수면 아직 하락 중"),
                 "시장보다 더 빠진 폭": st.column_config.NumberColumn(
                     format="%.1f%%p", help="같은 기간 시장 지수보다 얼마나 더 빠졌는지"
                 ),
-                "1년 중 위치": st.column_config.TextColumn(
+                "1년 위치": st.column_config.TextColumn(
+                    width="small",
                     help="1년 최저가부터 최고가까지 중 지금 가격이 어디쯤인지. '최저권'은 1년 중 가장 싼 쪽 10% 안",
                 ),
                 "PER": st.column_config.TextColumn(help="주가수익비율. 낮을수록 이익 대비 싼 편 (적자거나 정보가 없으면 –)"),
             },
         )
 
+        st.caption("표의 종목은 조건에 맞는 하락 종목일 뿐, 매수 추천이 아닙니다. 아래에서 하락 이유를 꼭 확인하세요.")
         st.subheader("종목별로 자세히 보기")
         for r in recs:
             a = r.analysis
             icon = CAUSE_STYLE[a.cause][0]
-            with st.expander(f"{icon} {r.stock.name} · 고점 대비 {r.drawdown:.1%} · {a.cause.label}"):
+            with st.expander(f"{icon} {r.stock.name} · 고점 대비 {pct_down(r.drawdown):.1f}% · {a.cause.label}"):
                 left, right = st.columns([3, 2])
                 with left:
                     st.markdown(f"{badge(a.cause)} &nbsp; {CAUSE_HELP[a.cause]}")
@@ -286,34 +401,39 @@ if view == VIEW_RECS:
                     if r.pbr:
                         facts.append(f"PBR {r.pbr:.2f}")
                     st.markdown(" · ".join(facts))
+                    if r.per or r.pbr:
+                        st.caption("PER: 1년 이익 대비 주가, PBR: 순자산 대비 주가. 같은 업종끼리 비교했을 때 낮을수록 싼 편입니다.")
                     st.markdown("**매수 전에 확인하세요**")
                     st.markdown("\n".join(f"- {n}" for n in buy_checks(r)))
 
+                    shock = a.worst_day is not None and a.worst_day_return <= -config.event_day_drop
+                    if shock and not a.key_news:
+                        st.markdown(
+                            f"{a.worst_day:%m/%d} 급락 무렵의 원인 뉴스는 자동으로 찾지 못했습니다. "
+                            f"[그 무렵 뉴스 직접 찾아보기]({news_search_url(r.stock, a.worst_day)})"
+                        )
                     if a.event_news:
-                        st.markdown("**하락 근거 뉴스**")
+                        st.markdown("**관련 악재 뉴스**")
                         for n in a.event_news[:4]:
                             near = (
                                 a.worst_day is not None
                                 and abs((n.published - a.worst_day).days) <= KEY_NEWS_WINDOW_DAYS
                             )
                             title = f"[{md_text(n.title)}]({n.url})" if n.url else md_text(n.title)
-                            mark = "🔑 급락일 무렵 · " if near else ""
+                            mark = "🔑 급락일 무렵 · " if near else ("급락 이후 보도 · " if shock and n.published > a.worst_day else "")
                             st.markdown(
                                 f"- {mark}{n.published:%Y-%m-%d} · {title} "
                                 + " ".join(f":orange-badge[{k}]" for k in n.matched_keywords)
                             )
                     else:
-                        if a.cause is DropCause.EVENT and a.worst_day is not None:
-                            st.markdown(
-                                f"{a.worst_day:%m/%d} 급락의 원인 뉴스를 자동으로 찾지 못했습니다. "
-                                f"[그 무렵 뉴스 직접 찾아보기]({news_search_url(r.stock.name, a.worst_day)})"
-                            )
+                        if shock:
+                            pass  # 위에서 이미 안내했다
                         elif a.news_checked:
                             st.caption(f"고점 이후 뉴스 {a.news_checked}건을 확인했지만 악재 표현은 없었습니다.")
                         else:
                             st.markdown(
                                 "관련 뉴스를 찾지 못했습니다. "
-                                f"[뉴스 직접 찾아보기]({news_search_url(r.stock.name, None)})"
+                                f"[뉴스 직접 찾아보기]({news_search_url(r.stock, None)})"
                             )
                         latest = sorted(
                             (n for n in r.news if n.published and n.published >= r.peak_date),
@@ -335,113 +455,42 @@ if view == VIEW_RECS:
                             st.write(st.session_state[key])
                 with right:
                     if r.closes is not None:
-                        cur = "원" if r.currency == "KRW" else "달러"
-                        df = r.closes.rename("종가").rename_axis("날짜").reset_index()
-                        base = alt.Chart(df).encode(x=alt.X("날짜:T", title=None))
-                        line = base.mark_line(strokeWidth=2, color="#1F5FBF").encode(
-                            y=alt.Y("종가:Q", title=f"종가({cur})", scale=alt.Scale(zero=False)),
-                            tooltip=[alt.Tooltip("날짜:T", format="%Y-%m-%d"), alt.Tooltip("종가:Q", format=",.2f")],
+                        st.altair_chart(drop_chart(r, provider, config), width="stretch")
+                        idx_name = INDEX_NAMES[r.stock.market]
+                        shock = a.worst_day is not None and a.worst_day_return <= -config.event_day_drop
+                        st.caption(
+                            f"고점을 100으로 맞춰 {idx_name}와 비교 · 점선: 고점보다 {drop}% 낮은 선"
+                            + (" · 주황 선: 급락일" if shock else "")
                         )
-                        marks = pd.DataFrame(
-                            [
-                                {"날짜": r.peak_date, "종가": r.peak_price, "표시": "고점"},
-                                {"날짜": r.closes.index[-1], "종가": r.price, "표시": "현재"},
-                            ]
-                        )
-                        points = alt.Chart(marks).mark_point(size=70, filled=True, color="#1F5FBF").encode(
-                            x="날짜:T", y="종가:Q", tooltip=["표시", alt.Tooltip("종가:Q", format=",.2f")]
-                        )
-                        labels = alt.Chart(marks).mark_text(dy=-10, fontSize=11).encode(
-                            x="날짜:T", y="종가:Q", text="표시"
-                        )
-                        threshold = alt.Chart(
-                            pd.DataFrame({"y": [r.peak_price * (1 - config.drop_threshold)]})
-                        ).mark_rule(strokeDash=[4, 4], color="#8a8f98").encode(y="y:Q")
-                        layers = [line, threshold, points, labels]
-                        if a.worst_day is not None and a.worst_day_return <= -config.event_day_drop:
-                            layers.append(
-                                alt.Chart(pd.DataFrame({"x": [a.worst_day]}))
-                                .mark_rule(color="#d9822b", strokeDash=[2, 2])
-                                .encode(x="x:T")
-                            )
-                        st.altair_chart(alt.layer(*layers).properties(height=230), width="stretch")
-                        st.caption(f"점선: 고점보다 {drop}% 낮은 가격" + (" · 주황 선: 급락일" if len(layers) > 4 else ""))
 
                 with st.form(key=f"buyform:{r.stock.ticker}", border=False, enter_to_submit=False):
                     fc = st.columns([2, 1], vertical_alignment="bottom")
-                    fc[0].number_input("모의 매수 수량(주)", min_value=1, value=1, step=1, key=f"qty:{r.stock.ticker}")
+                    st.session_state.setdefault(f"qty:{r.stock.ticker}", 1)
+                    fc[0].number_input("모의 매수 수량(주)", min_value=1, step=1, key=f"qty:{r.stock.ticker}")
                     fc[1].form_submit_button(
                         "모의 매수",
-                        on_click=lambda t=r.stock.ticker, n=r.stock.name, c=r.currency: place_buy(t, n, c, f"qty:{t}"),
+                        on_click=place_buy, args=(r.stock.ticker, r.stock.name, r.currency, f"qty:{r.stock.ticker}", f"rec:{r.stock.ticker}"),
                         width="stretch",
                     )
+                show_msg(f"rec:{r.stock.ticker}")
+                st.caption("가상 돈으로 하는 연습 매수입니다. 이 화면은 투자 권유가 아닙니다.")
 
     st.divider()
     st.caption(DISCLAIMER)
 
 
-# ======================= 모의투자 =======================
-def load_portfolio() -> Portfolio | None:
-    try:
-        return STORE.load(st.session_state.get("account", "내 계좌"))
-    except ValueError:
-        return None
-
-
-def place_buy(ticker: str, name: str, currency: str, qty_key: str) -> None:
-    # 폼 안의 수량은 제출 시점에 확정되므로 콜백에서 직접 읽는다.
-    qty = int(st.session_state[qty_key])
-    account = st.session_state.get("account", "내 계좌")
-    price = quote(ticker)
-    fx = quote(FX_TICKER) if currency == "USD" else 1.0
-    if price is None or fx is None:
-        st.session_state.trade_msg = ("err", "현재가나 환율을 가져오지 못해 주문하지 못했습니다. 잠시 뒤 다시 시도하세요.")
-        return
-    try:
-        # 최신 계좌를 다시 읽어서 거래해야 다른 탭에서 한 거래를 덮어쓰지 않는다.
-        with STORE.transaction(account) as portfolio:
-            t = portfolio.buy(ticker, name, currency, qty, price, fx)
-    except TradeError as e:
-        st.session_state.trade_msg = ("err", str(e))
-        return
-    except ValueError:
-        st.session_state.trade_msg = ("err", "모의투자 화면에서 계좌 이름을 먼저 입력하세요.")
-        return
-    st.session_state[qty_key] = 1  # 같은 수량이 실수로 다시 주문되지 않도록 되돌린다
-    st.session_state.trade_msg = (
-        "ok", f"[{account.strip()}] {name} {qty}주 매수 ({md_price(price, currency)}, 총 {fmt_krw(t.amount_krw)})"
-    )
-
-
-def place_sell(ticker: str, currency: str, qty_key: str) -> None:
-    qty = int(st.session_state[qty_key])
-    account = st.session_state.get("account", "내 계좌")
-    price = quote(ticker)
-    fx = quote(FX_TICKER) if currency == "USD" else 1.0
-    if price is None or fx is None:
-        st.session_state.trade_msg = ("err", "현재가나 환율을 가져오지 못해 주문하지 못했습니다. 잠시 뒤 다시 시도하세요.")
-        return
-    try:
-        with STORE.transaction(account) as portfolio:
-            t = portfolio.sell(ticker, qty, price, fx)
-    except (TradeError, ValueError) as e:
-        st.session_state.trade_msg = ("err", str(e))
-        return
-    st.session_state.pop(qty_key, None)
-    st.session_state.trade_msg = ("ok", f"{t.name} {qty}주 매도 (실현손익 {t.realized_krw:+,.0f}원)")
-
-
-# 주문 결과는 화면 배치를 바꾸지 않도록 토스트로 띄운다.
-if msg := st.session_state.pop("trade_msg", None):
+# 주문 결과 토스트 (보조 알림). 고정 메시지는 각 폼 아래에 show_msg로 보여준다.
+if st.session_state.pop("toast_pending", False) and (msg := st.session_state.get("trade_msg")):
     st.toast(msg[1], icon="✅" if msg[0] == "ok" else "⚠️")
 
 if view == VIEW_PAPER:
     st.title("💼 모의투자")
-    st.caption("가상 돈으로 사고팔며 연습해 보세요. 가장 최근 가격으로 체결되고, 미국 주식은 그때 환율로 원화로 계산합니다. 수수료·세금은 빼지 않습니다.")
+    st.caption("가상 돈으로 사고팔며 연습해 보세요. 화면에 보이는 최근 가격(최대 1시간 전)으로 체결되고, 미국 주식은 그때 환율로 원화로 계산합니다. 수수료·세금은 빼지 않습니다.")
     st.text_input(
-        "계좌 이름", value="내 계좌", key="account",
+        "계좌 이름", key="account",
         help="같은 이름을 입력하면 같은 계좌가 열립니다. 로그인이 없으니 남이 쓰기 어려운 이름을 쓰세요.",
     )
+    st.caption("💡 이 계좌 이름을 기억해 두세요. 다음에 들어와서 같은 이름을 입력하면 이 계좌가 다시 열립니다.")
     portfolio = load_portfolio()
     if portfolio is None:
         st.error("계좌 이름을 입력하세요.")
@@ -537,11 +586,13 @@ if view == VIEW_PAPER:
         price = quote(ticker)
         st.caption("현재가 " + ("확인 불가" if price is None else md_price(price, currency)))
         with st.form("paper_buy_form", border=False, enter_to_submit=False):
-            st.number_input("수량(주)", min_value=1, value=1, step=1, key="paper_buy_qty")
+            st.session_state.setdefault("paper_buy_qty", 1)
+            st.number_input("수량(주)", min_value=1, step=1, key="paper_buy_qty")
             st.form_submit_button(
                 "사기", type="primary", on_click=place_buy,
-                args=(ticker, stock.name, currency, "paper_buy_qty"),
+                args=(ticker, stock.name, currency, "paper_buy_qty", "paper_buy"),
             )
+        show_msg("paper_buy")
     with sell_col:
         st.subheader("팔기")
         if portfolio.positions:
@@ -559,9 +610,10 @@ if view == VIEW_PAPER:
             qty_key = f"paper_sell_qty:{sell_ticker}:{pos.quantity}"
             with st.form("paper_sell_form", border=False, enter_to_submit=False):
                 st.number_input("수량(주)", min_value=1, max_value=pos.quantity, value=1, step=1, key=qty_key)
-                st.form_submit_button("팔기", on_click=place_sell, args=(sell_ticker, pos.currency, qty_key))
+                st.form_submit_button("팔기", on_click=place_sell, args=(sell_ticker, pos.currency, qty_key, "paper_sell"))
         else:
             st.caption("팔 종목이 없습니다.")
+        show_msg("paper_sell")
 
     st.subheader("거래 내역")
     if portfolio.trades:
@@ -603,8 +655,10 @@ if view == VIEW_PAPER:
             else:
                 restored.name = portfolio.name
                 STORE.replace(restored)
-                st.session_state.trade_msg = ("ok", "백업 파일로 복원했습니다.")
+                st.session_state._order_where = "manage"
+                set_msg("ok", "백업 파일로 복원했습니다.")
                 st.rerun()
+        show_msg("manage")
         st.divider()
         start_cash = st.number_input(
             "초기화할 시작 금액(원)", min_value=1_000_000, value=int(portfolio.initial_cash), step=1_000_000
@@ -614,9 +668,10 @@ if view == VIEW_PAPER:
         def reset_account(cash: float) -> None:
             STORE.replace(Portfolio(name=portfolio.name, initial_cash=cash, cash=cash))
             st.session_state.reset_confirm = False
-            st.session_state.trade_msg = ("ok", f"{fmt_krw(cash)}으로 계좌를 초기화했습니다.")
+            st.session_state._order_where = "manage"
+            set_msg("ok", f"{fmt_krw(cash)}으로 계좌를 초기화했습니다.")
 
         st.button("계좌 초기화", disabled=not confirm, on_click=reset_account, args=(float(start_cash),))
 
     st.divider()
-    st.caption("※ 모의투자 결과는 실제 수익을 보장하지 않습니다. " + DISCLAIMER)
+    st.caption("※ 모의투자 결과는 실제 수익을 보장하지 않습니다. " + DISCLAIMER.removeprefix("※ "))

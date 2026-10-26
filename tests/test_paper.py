@@ -88,3 +88,10 @@ def test_failed_trade_is_not_saved(tmp_path):
 def test_similar_names_map_to_different_files(tmp_path):
     store = PortfolioStore(tmp_path)
     assert store._path("a b") != store._path("a_b")
+
+
+@pytest.mark.parametrize("patch", [{"initial_cash": 0}, {"cash": -1}, {"cash": float("nan")}, {"initial_cash": "abc"}])
+def test_restore_rejects_invalid_numbers(patch):
+    d = Portfolio("t").to_dict() | patch
+    with pytest.raises((ValueError, TypeError)):
+        Portfolio.from_dict(d)

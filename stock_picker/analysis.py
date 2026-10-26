@@ -99,9 +99,14 @@ def analyze_drop(
         event_news.sort(key=lambda n: abs((n.published - worst_day).total_seconds()))
     else:
         event_news.sort(key=lambda n: n.published, reverse=True)
+    shock_day = worst_ret <= -config.event_day_drop
+    near = (
+        [n for n in event_news if abs((n.published - worst_day).days) <= KEY_NEWS_WINDOW_DAYS]
+        if shock_day
+        else []
+    )
 
     market_driven = index_ret <= -config.market_drop and excess > -config.excess_drop
-    shock_day = worst_ret <= -config.event_day_drop
 
     if market_driven:
         cause = DropCause.MARKET
@@ -111,17 +116,26 @@ def analyze_drop(
         )
     elif event_news or shock_day:
         cause = DropCause.EVENT
-        parts = []
-        if shock_day:
-            parts.append(f"{worst_day:%m월 %d일} 하루에 {worst_ret:.1%} 급락했습니다")
-        if event_news:
-            labels = sorted({k for n in event_news for k in n.matched_keywords})
-            parts.append("악재 뉴스(" + ", ".join(labels) + ")가 확인됩니다")
-        summary = (
-            f"시장({index_ret:+.1%})보다 {abs(min(excess, 0)):.1%}p 더 빠졌고, "
-            + ", ".join(parts)
-            + ". 특정 사건이 하락을 이끈 것으로 보입니다."
-        )
+        labels = lambda ns: ", ".join(sorted({k for n in ns for k in n.matched_keywords}))  # noqa: E731
+        lead = f"시장({index_ret:+.1%})보다 {abs(min(excess, 0)):.1%}p 더 빠졌습니다. "
+        if near:
+            body = (
+                f"{worst_day:%m월 %d일} 하루에 {worst_ret:.1%} 급락했고, 그 무렵 악재 뉴스({labels(near)})가 나왔습니다. "
+                "이 사건이 하락을 이끈 것으로 보입니다."
+            )
+        elif shock_day and event_news:
+            body = (
+                f"{worst_day:%m월 %d일} 하루에 {worst_ret:.1%} 급락했지만, 그날 무렵의 원인 뉴스는 찾지 못했습니다. "
+                f"급락 이후에 관련 악재({labels(event_news)})가 보도됐습니다."
+            )
+        elif shock_day:
+            body = (
+                f"{worst_day:%m월 %d일} 하루에 {worst_ret:.1%} 급락했습니다. 무언가 사건이 있었던 것으로 보이지만 "
+                "원인 뉴스는 찾지 못했습니다."
+            )
+        else:
+            body = f"하루 급락은 없었지만 고점 이후 악재 뉴스({labels(event_news)})가 나왔습니다."
+        summary = lead + body
     else:
         cause = DropCause.NO_CLEAR_REASON
         news_part = (
@@ -143,4 +157,5 @@ def analyze_drop(
         worst_day=worst_day,
         event_news=event_news,
         news_checked=len(recent),
+        key_news=len(near),
     )

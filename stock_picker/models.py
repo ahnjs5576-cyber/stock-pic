@@ -51,6 +51,7 @@ class DropAnalysis:
     worst_day: datetime | None
     event_news: list[NewsItem] = field(default_factory=list)  # 급락일에 가까운 순
     news_checked: int = 0             # 판정에 쓴 (날짜 있는) 고점 이후 뉴스 수
+    key_news: int = 0                 # event_news 중 급락일 무렵(±3일) 뉴스 수 (앞쪽에 정렬돼 있음)
     ai_explanation: str | None = None
 
 
@@ -69,6 +70,7 @@ class Recommendation:
     low_since_peak: float | None = None   # 고점 이후 최저 종가
     rebound: float | None = None          # 그 최저가 대비 현재가 (0.05 = 5% 반등)
     trend_5d: float | None = None         # 최근 5거래일 수익률
+    trend_20d: float | None = None        # 최근 20거래일 수익률
     high_52w: float | None = None
     low_52w: float | None = None
     per: float | None = None

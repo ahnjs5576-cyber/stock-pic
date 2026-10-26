@@ -48,10 +48,12 @@ def screen(
         if drawdown_from_peak(closes)[0] <= -config.drop_threshold:
             candidates.append((stock, closes))
 
-    # 2단계: 후보만 시가총액·뉴스·재무지표를 받는다 (가능하면 병렬).
+    # 2단계: 후보의 시가총액을 먼저 확인하고, 대형주만 뉴스·재무지표를 받는다 (가능하면 병렬).
     warm = getattr(provider, "warm", None)
     if warm:
-        warm([s for s, _ in candidates], on_progress)
+        warm([s for s, _ in candidates], kinds=("cap",))
+        big = [s for s, _ in candidates if (provider.market_cap(s.ticker) or 0) >= config.min_market_cap[s.market]]
+        warm(big, on_progress, kinds=("news", "fund"))
 
     index_cache: dict[Market, pd.Series] = {}
     results: list[Recommendation] = []
@@ -90,6 +92,7 @@ def screen(
                 low_since_peak=low,
                 rebound=price / low - 1,
                 trend_5d=price / float(closes.iloc[-6]) - 1 if len(closes) >= 6 else None,
+                trend_20d=price / float(closes.iloc[-21]) - 1 if len(closes) >= 21 else None,
                 high_52w=float(year.max()) if not year.empty else None,
                 low_52w=float(year.min()) if not year.empty else None,
                 per=fund.get("per"),

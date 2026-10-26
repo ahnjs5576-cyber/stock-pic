@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import threading
 import uuid
@@ -159,13 +160,21 @@ class Portfolio:
             )
             for t in d.get("trades", [])
         ]
-        return cls(
+        portfolio = cls(
             name=str(d["name"]),
             initial_cash=float(d["initial_cash"]),
             cash=float(d["cash"]),
             positions=positions,
             trades=trades,
         )
+        numbers = [portfolio.initial_cash, portfolio.cash]
+        numbers += [x for p in positions.values() for x in (p.avg_price, p.cost_krw)]
+        numbers += [x for t in trades for x in (t.price, t.fx, t.amount_krw, t.realized_krw)]
+        if not all(math.isfinite(x) for x in numbers):
+            raise ValueError("숫자가 아닌 값(NaN 등)이 들어 있습니다.")
+        if portfolio.initial_cash <= 0 or portfolio.cash < 0:
+            raise ValueError("시작 금액은 0보다 크고, 현금은 0 이상이어야 합니다.")
+        return portfolio
 
 
 class PortfolioStore:

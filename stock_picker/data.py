@@ -68,7 +68,7 @@ class YahooProvider:
 
     def closes(self, ticker: str, days: int) -> pd.Series:
         try:
-            df = self._yf.Ticker(ticker).history(period=self._period(days), auto_adjust=True)
+            df = self._yf.Ticker(ticker).history(period=self._period(days), auto_adjust=True, timeout=self._timeout)
         except Exception as e:
             log.warning("시세 조회 실패 %s: %s", ticker, e)
             return pd.Series(dtype=float)
@@ -181,6 +181,7 @@ class CachingProvider:
         self.workers = workers
         self._lock = threading.Lock()
         self._prices: dict[str, tuple[float, pd.Series]] = {}
+        self._failed: dict[str, float] = {}  # 시세를 못 받은 종목 → 다시 시도할 시각
         self._details: dict[tuple[str, str], tuple[float, object]] = {}
 
     def _fresh(self, stamp: float) -> bool:
@@ -190,42 +191,66 @@ class CachingProvider:
         with self._lock:
             self._prices.clear()
             self._details.clear()
+            self._failed.clear()
+
+    def _can_retry(self, ticker: str) -> bool:
+        return time.time() >= self._failed.get(ticker, 0)
 
     # ---- 시세 ----
     def load_prices(self, tickers: list[str]) -> None:
         """캐시에 없거나 오래된 종목만 한 번에 받아 둔다."""
         with self._lock:
-            missing = [t for t in tickers if t not in self._prices or not self._fresh(self._prices[t][0])]
+            missing = [
+                t for t in tickers
+                if (t not in self._prices or not self._fresh(self._prices[t][0])) and self._can_retry(t)
+            ]
         if not missing:
             return
         many = getattr(self.base, "closes_many", None)
-        got = many(missing, self.history_days) if many else {
-            t: self.base.closes(t, self.history_days) for t in missing
-        }
+        got = many(missing, self.history_days) if many else {}
+        # 일괄 조회에서 빠진 종목은 한 번만, 병렬로 따로 받아 본다.
+        rest = [t for t in missing if t not in got or got[t].empty]
+        if rest:
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                got.update(zip(rest, pool.map(lambda t: self.base.closes(t, self.history_days), rest)))
         now = time.time()
         with self._lock:
-            for t, s in got.items():
-                if not s.empty:
+            for t in missing:
+                s = got.get(t)
+                if s is not None and not s.empty:
                     self._prices[t] = (now, s)
+                    self._failed.pop(t, None)
+                else:
+                    # 실패한 종목은 잠깐 기억해서 화면을 누를 때마다 다시 요청하지 않는다.
+                    self._failed[t] = now + self.retry_ttl
 
     def closes(self, ticker: str, days: int) -> pd.Series:
         with self._lock:
             hit = self._prices.get(ticker)
         if hit is None or not self._fresh(hit[0]):
-            s = self.base.closes(ticker, self.history_days)
+            s = self.base.closes(ticker, self.history_days) if self._can_retry(ticker) else pd.Series(dtype=float)
             if s.empty:
+                with self._lock:
+                    self._failed.setdefault(ticker, time.time() + self.retry_ttl)
                 # 다시 받기에 실패하면 예전 시세라도 쓴다 (기준일은 as_of로 드러난다).
                 return hit[1].iloc[-days:] if hit else s
             hit = (time.time(), s)
             with self._lock:
                 self._prices[ticker] = hit
+                self._failed.pop(ticker, None)
         return hit[1].iloc[-days:]
 
-    def as_of(self) -> datetime | None:
-        """캐시된 시세 중 가장 최근 거래일."""
+    def as_of(self, tickers: list[str] | None = None) -> datetime | None:
+        """시세 기준일. tickers를 주면 그 종목들(보통 시장 지수) 중 가장 오래된 마지막 거래일을 돌려줘
+        한 시장만 갱신에 실패했을 때 기준일이 실제보다 새로워 보이지 않게 한다."""
         with self._lock:
-            dates = [s.index[-1] for _, s in self._prices.values() if not s.empty]
-        return max(dates).to_pydatetime() if dates else None
+            if tickers is None:
+                dates = [s.index[-1] for _, s in self._prices.values() if not s.empty]
+                return max(dates).to_pydatetime() if dates else None
+            series = [self._prices.get(t) for t in tickers]
+        if any(hit is None or hit[1].empty for hit in series):
+            return None
+        return min(hit[1].index[-1] for hit in series).to_pydatetime()
 
     # ---- 종목별 상세 ----
     def _detail(self, kind: str, ticker: str, fetch):
@@ -258,16 +283,22 @@ class CachingProvider:
 
         return self._detail("fund", ticker, get) or {"per": None, "pbr": None}
 
-    def warm(self, stocks: list[Stock], on_progress: Callable[[int, int], None] | None = None) -> None:
-        """후보 종목의 시가총액·뉴스·재무지표를 병렬로 받아 둔다."""
+    def warm(
+        self,
+        stocks: list[Stock],
+        on_progress: Callable[[int, int], None] | None = None,
+        kinds: tuple[str, ...] = ("cap", "news", "fund"),
+    ) -> None:
+        """종목들의 시가총액·뉴스·재무지표 중 kinds에 해당하는 것을 병렬로 받아 둔다."""
+        fetchers = {
+            "cap": lambda s: self.market_cap(s.ticker),
+            "news": self.news,
+            "fund": lambda s: self.fundamentals(s.ticker),
+        }
         jobs = []
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
             for s in stocks:
-                jobs += [
-                    pool.submit(self.market_cap, s.ticker),
-                    pool.submit(self.news, s),
-                    pool.submit(self.fundamentals, s.ticker),
-                ]
+                jobs += [pool.submit(fetchers[k], s) for k in kinds]
             for i, _ in enumerate(as_completed(jobs), 1):
                 if on_progress:
                     on_progress(i, len(jobs))

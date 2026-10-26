@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 
-from .models import Recommendation
+from .models import DropCause, Recommendation
 
 DISCLAIMER = (
     "※ 본 결과는 정보 제공용이며 투자 권유가 아닙니다. 하락한 주식이 반드시 반등하는 것은 아니며, "
@@ -14,23 +14,31 @@ DISCLAIMER = (
 ADVICE = {
     "EVENT": "악재가 일회성(소송 합의, 일시적 비용 등)인지, 앞으로의 실적 전망 자체를 바꾸는 것인지 먼저 확인하세요.",
     "MARKET": "시장 전체가 빠진 경우라 시장이 회복되면 함께 오를 가능성이 있습니다. 지수 흐름을 같이 보세요.",
-    "NO_CLEAR_REASON": "회사에 특별한 악재 없이 빠졌다면 저가 매수 후보가 될 수 있습니다. 다만 업황 변화는 따로 확인하세요.",
+    "NO_CLEAR_REASON": "뉴스로 확인되는 악재 없이 빠졌습니다. 회사 가치가 그대로라면 저가 매수 기회일 수 있지만, 업황이나 실적 전망 변화는 따로 확인하세요.",
 }
 
 
 def buy_checks(rec: Recommendation) -> list[str]:
     """매수 전에 확인할 점: 원인별 조언 + 추세·가격 위치에 따른 신호."""
-    notes = [ADVICE[rec.analysis.cause.value]]
-    if rec.trend_5d is not None and rec.trend_5d <= -0.03:
+    a = rec.analysis
+    notes = [ADVICE[a.cause.value]]
+    if a.cause is not DropCause.MARKET and a.excess_return <= -0.10 and still_falling(rec):
         notes.append(
-            f"최근 5거래일 동안 {rec.trend_5d:.1%} 더 빠져 아직 하락 중입니다. "
-            "한 번에 사기보다 나눠 사는 방법을 고려하세요."
+            f"⚠️ 시장보다 {abs(a.excess_return):.1%}p 더 빠졌고 지금도 약세가 이어지고 있습니다. "
+            "이렇게 혼자 계속 약한 종목은 아직 드러나지 않은 이유가 있을 수 있으니 특히 조심하세요."
         )
+    if still_falling(rec):
+        notes.append("아직 하락이 멈추지 않았습니다. 한 번에 사기보다 나눠 사는 방법을 고려하세요.")
     elif rec.rebound is not None and rec.rebound >= 0.05:
         notes.append(f"고점 이후 최저가보다 {rec.rebound:.1%} 올라와, 하락이 멈추는 모습입니다.")
-    if rec.low_52w and rec.price <= rec.low_52w * 1.03:
-        notes.append("1년 중 가장 낮은 가격 근처입니다.")
     return notes
+
+
+def still_falling(rec: Recommendation) -> bool:
+    """최근 5일 -2% 이하이거나 최근 20일 -5% 이하면 아직 하락 중으로 본다."""
+    return (rec.trend_5d is not None and rec.trend_5d <= -0.02) or (
+        rec.trend_20d is not None and rec.trend_20d <= -0.05
+    )
 
 
 def range_position(rec: Recommendation) -> float | None:
