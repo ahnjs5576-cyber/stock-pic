@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -187,3 +187,16 @@ def test_exactly_threshold_drop_is_included():
 def test_market_without_index_is_skipped():
     p = FakeProvider({"A.KS": gradual(end=70), "^KS11": series([])})
     assert screen(p, [Market.KOSPI], ScreenConfig(), stocks=KR[:1]) == []
+
+
+def test_earnings_news_days_after_crash_explains_it():
+    # 30일째 급락, 실적 악재 기사는 10일 뒤 → 급락 이유로 연결하되 '며칠 뒤 보도'라고 밝힌다
+    crash = DATES[30].to_pydatetime()
+    late = NewsItem("갑, 3분기 어닝쇼크", published=crash + timedelta(days=10))
+    unrelated = NewsItem("갑 공장 화재 사고", published=crash + timedelta(days=10))
+    p = FakeProvider({"A.KS": gap_down(), "^KS11": flat()}, news={"A.KS": [unrelated, late]})
+    [rec] = screen(p, [Market.KOSPI], ScreenConfig(), stocks=KR[:1])
+    a = rec.analysis
+    assert a.key_news == 1 and a.key_news_late
+    assert a.event_news[0].title == late.title  # 원인 뉴스가 맨 앞
+    assert "며칠 뒤 실적 관련 악재" in a.summary

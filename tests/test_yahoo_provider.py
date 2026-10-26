@@ -69,12 +69,14 @@ def test_fundamentals_ignores_invalid_values(provider):
     assert provider.fundamentals("AAA") == {"per": 15.5, "pbr": None}
 
 
-def test_news_parses_both_formats_as_naive_utc(provider, monkeypatch):
+def test_news_parses_both_formats_in_market_local_time(provider, monkeypatch):
     monkeypatch.setattr(provider, "_google_news", lambda *a: [])
     items = provider.news(Stock("AAA", "Acme", Market.US))
     assert [n.title for n in items] == ["Acme misses estimates", "Old format item"]
     assert all(n.published.tzinfo is None for n in items)
-    assert items[0].published.hour == 12
+    assert items[0].published.hour == 8  # 12:00 UTC = 08:00 뉴욕(서머타임)
+    kr = provider.news(Stock("BBB", "삼성", Market.KOSPI))
+    assert kr[0].published.hour == 21  # 12:00 UTC = 21:00 서울
 
 
 def test_caching_provider_uses_one_bulk_download(provider):

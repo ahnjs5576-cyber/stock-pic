@@ -62,6 +62,18 @@ def _pp(v: float) -> str:
 
 # 급락일과 이 기간 안에 나온 뉴스를 '핵심 근거'로 본다
 KEY_NEWS_WINDOW_DAYS = 3
+# 실적·전망 관련 악재는 급락 뒤 며칠~2주 사이에 정리 기사로 나오는 경우가 많아 더 넓게 본다
+EARNINGS_LABELS = {"실적 부진", "전망 하향"}
+EARNINGS_WINDOW_DAYS = 14
+
+
+def explains_crash(n: NewsItem, worst_day: datetime) -> bool:
+    """이 뉴스가 급락일의 원인을 설명할 수 있는 시점에 나왔는가."""
+    # 급락일(그날 0시) 기준으로 앞뒤 대칭인 창을 쓴다. 급락일 당일 기사도 '0일'로 본다.
+    days = (n.published - worst_day).total_seconds() / 86400
+    if -KEY_NEWS_WINDOW_DAYS <= days < KEY_NEWS_WINDOW_DAYS + 1:
+        return True
+    return 0 < days < EARNINGS_WINDOW_DAYS + 1 and bool(EARNINGS_LABELS & set(n.matched_keywords))
 
 
 def match_keywords(title: str, company: str = "") -> list[str]:
@@ -106,11 +118,12 @@ def analyze_drop(
     else:
         event_news.sort(key=lambda n: n.published, reverse=True)
     shock_day = worst_ret <= -config.event_day_drop
-    near = (
-        [n for n in event_news if abs((n.published - worst_day).days) <= KEY_NEWS_WINDOW_DAYS]
-        if shock_day
-        else []
+    near = [n for n in event_news if explains_crash(n, worst_day)] if shock_day else []
+    near_late = bool(near) and all(
+        (n.published - worst_day).total_seconds() / 86400 >= KEY_NEWS_WINDOW_DAYS + 1 for n in near
     )
+    # 원인 뉴스를 맨 앞에 둔다
+    event_news.sort(key=lambda n: n not in near)
 
     # 지수가 크게 빠졌고, 이 종목이 지수보다 '조금만' 더 빠졌을 때만 시장 탓으로 본다
     # (절대 차이와 배수 둘 다 확인: 지수 -12%에 종목 -21%면 거의 두 배라 시장 탓으로 보지 않는다).
@@ -130,7 +143,12 @@ def analyze_drop(
         cause = DropCause.EVENT
         labels = lambda ns: ", ".join(sorted({k for n in ns for k in n.matched_keywords}))  # noqa: E731
         lead = f"시장({'-' if index_ret < 0 else '+'}{_pp(index_ret)}%)보다 {_pp(min(excess, 0))}%p 더 빠졌습니다. "
-        if near:
+        if near and near_late:
+            body = (
+                f"{worst_day:%m/%d} 하루에 -{_pp(worst_ret)}% 급락했고, 며칠 뒤 실적 관련 악재({labels(near)})가 "
+                "보도됐습니다. 이 실적 소식이 하락 이유를 설명할 수 있습니다."
+            )
+        elif near:
             body = (
                 f"{worst_day:%m/%d} 하루에 -{_pp(worst_ret)}% 급락했고, 그 무렵 악재 뉴스({labels(near)})가 나왔습니다. "
                 "이 사건이 하락을 이끈 것으로 보입니다."
@@ -170,4 +188,5 @@ def analyze_drop(
         event_news=event_news,
         news_checked=len(recent),
         key_news=len(near),
+        key_news_late=near_late,
     )

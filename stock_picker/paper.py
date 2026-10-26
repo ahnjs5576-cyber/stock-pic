@@ -120,7 +120,7 @@ class Portfolio:
                     "price": price,
                     "value_krw": value,
                     "pnl_krw": None if value is None else value - pos.cost_krw,
-                    "pnl_pct": None if value is None else value / pos.cost_krw - 1,
+                    "pnl_pct": None if value is None or pos.cost_krw <= 0 else value / pos.cost_krw - 1,
                 }
             )
         return rows
@@ -149,7 +149,10 @@ class Portfolio:
                 ticker=str(v["ticker"]), name=str(v["name"]), currency=str(v["currency"]),
                 quantity=int(v["quantity"]), avg_price=float(v["avg_price"]), cost_krw=float(v["cost_krw"]),
             )
-            if positions[str(k)].quantity <= 0 or positions[str(k)].currency not in ("KRW", "USD"):
+            pos = positions[str(k)]
+            if pos.avg_price <= 0 or pos.cost_krw <= 0:
+                raise ValueError("평균 매수가와 원가는 0보다 커야 합니다.")
+            if pos.quantity <= 0 or pos.currency not in ("KRW", "USD"):
                 raise ValueError("보유 종목 정보가 올바르지 않습니다.")
         for t in d.get("trades", []):
             if t["side"] not in ("BUY", "SELL") or float(t["quantity"]) != int(float(t["quantity"])):

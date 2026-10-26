@@ -21,7 +21,7 @@ class DropCause(str, Enum):
         return {
             DropCause.EVENT: "사건성 하락",
             DropCause.MARKET: "시장 전반 하락",
-            DropCause.NO_CLEAR_REASON: "뚜렷한 이유 없는 하락",
+            DropCause.NO_CLEAR_REASON: "이유 불분명 하락",
         }[self]
 
 
@@ -51,7 +51,8 @@ class DropAnalysis:
     worst_day: datetime | None
     event_news: list[NewsItem] = field(default_factory=list)  # 급락일에 가까운 순
     news_checked: int = 0             # 판정에 쓴 (날짜 있는) 고점 이후 뉴스 수
-    key_news: int = 0                 # event_news 중 급락일 무렵(±3일) 뉴스 수 (앞쪽에 정렬돼 있음)
+    key_news: int = 0                 # event_news 중 급락을 설명하는 뉴스 수 (앞쪽에 정렬돼 있음)
+    key_news_late: bool = False       # 그 뉴스가 급락 며칠 뒤에 나온 실적 보도인지
     ai_explanation: str | None = None
 
 

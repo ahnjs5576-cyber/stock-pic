@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Protocol
 
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import requests
 
@@ -36,6 +38,9 @@ class MarketDataProvider(Protocol):
 def empty_series() -> pd.Series:
     """빈 시세. 날짜 인덱스를 유지해야 날짜 비교 코드가 오류 없이 빈 결과를 낸다."""
     return pd.Series(dtype=float, index=pd.DatetimeIndex([]))
+
+
+MARKET_TZ = {Market.KOSPI: ZoneInfo("Asia/Seoul"), Market.US: ZoneInfo("America/New_York")}
 
 
 class YahooProvider:
@@ -110,6 +115,12 @@ class YahooProvider:
         query = f"{stock.name} 주가" if stock.market is Market.KOSPI else f"{stock.name} stock"
         lang = ("ko", "KR") if stock.market is Market.KOSPI else ("en", "US")
         items += self._google_news(query, *lang)
+        # 뉴스 시각(UTC)을 그 시장의 현지 시각으로 바꾼다. 시세 날짜가 거래소 현지 날짜라서
+        # 같은 기준이어야 '고점 이후', '급락일 무렵' 판정과 화면의 날짜가 맞는다.
+        tz = MARKET_TZ[stock.market]
+        for n in items:
+            if n.published is not None:
+                n.published = n.published.replace(tzinfo=timezone.utc).astimezone(tz).replace(tzinfo=None)
         return items
 
     def _yahoo_news(self, ticker: str) -> list[NewsItem]:
@@ -189,6 +200,7 @@ class CachingProvider:
         self._failed: dict[str, float] = {}  # 시세를 못 받은 종목 → 다시 시도할 시각
         # 여러 사용자가 동시에 들어와도 같은 시세를 한 번만 받도록, 받는 동안 다른 요청은 기다린다.
         self._load_lock = threading.Lock()
+        self.version = 0  # 시세를 새로 받거나 버릴 때마다 올라간다 (분석 결과 캐시를 무효화하는 데 쓴다)
         self._details: dict[tuple[str, str], tuple[float, object]] = {}
 
     def _fresh(self, stamp: float) -> bool:
@@ -199,6 +211,7 @@ class CachingProvider:
             self._prices.clear()
             self._details.clear()
             self._failed.clear()
+            self.version += 1
 
     def refresh_stale(self, min_age: float = 600) -> None:
         """min_age초보다 오래된 데이터만 버린다. 누군가 '새로 불러오기'를 연타해도
@@ -208,6 +221,7 @@ class CachingProvider:
             self._prices = {t: v for t, v in self._prices.items() if v[0] >= cutoff}
             self._details = {k: v for k, v in self._details.items() if v[0] - self.ttl >= cutoff}
             self._failed.clear()
+            self.version += 1
 
     def loaded_at(self, tickers: list[str]) -> float | None:
         """해당 종목들 시세를 받은 시각 중 가장 이른 시각 (epoch초)."""
@@ -241,6 +255,7 @@ class CachingProvider:
                 got.update(zip(rest, pool.map(lambda t: self.base.closes(t, self.history_days), rest)))
         now = time.time()
         with self._lock:
+            self.version += 1
             for t in missing:
                 s = got.get(t)
                 if s is not None and not s.empty:
